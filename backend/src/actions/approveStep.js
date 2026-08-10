@@ -80,6 +80,10 @@ const APPROVE_STEP = gql`
 
 app.post("/", async (req, res) => {
   try {
+    console.log(
+  "APPROVE STEP BODY:",
+  JSON.stringify(req.body)
+);
     const sessionVariables =
       req.body.session_variables || {};
 
