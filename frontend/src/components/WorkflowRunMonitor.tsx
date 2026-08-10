@@ -58,7 +58,6 @@ export default function WorkflowRunMonitor({
             status
             approved_by
             approved_at
-            workflow_run_status
           }
         }
       `,
@@ -75,7 +74,6 @@ export default function WorkflowRunMonitor({
           status: string;
           approved_by: string | null;
           approved_at: string | null;
-          workflow_run_status: string;
         };
       };
     };

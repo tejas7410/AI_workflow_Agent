@@ -9,7 +9,6 @@ export type StepRun = {
   workflow_run_id: string;
   workflow_step_id: string;
   status: string;
-  input: Record<string, unknown> | null;
   output: Record<string, unknown> | null;
   error: string | null;
   attempt_count: number;
@@ -21,6 +20,13 @@ export type StepRun = {
 
 type SubscriptionData = {
   step_runs: StepRun[];
+};
+
+type SubscriptionResult = {
+  data?: SubscriptionData;
+  errors?: Array<{
+    message: string;
+  }>;
 };
 
 export function useStepRunsSubscription(
@@ -41,44 +47,78 @@ export function useStepRunsSubscription(
 
     let stopped = false;
 
-    const graphqlUrl =
-      nhost.graphql.url;
+    const subdomain =
+      process.env.NEXT_PUBLIC_NHOST_SUBDOMAIN;
+
+    const region =
+      process.env.NEXT_PUBLIC_NHOST_REGION;
+
+    if (!subdomain || !region) {
+      setError(
+        "Nhost configuration is missing."
+      );
+      return;
+    }
 
     const wsUrl =
-      graphqlUrl
-        .replace(
-          /^https:\/\//,
-          "wss://"
-        )
-        .replace(
-          /^http:\/\//,
-          "ws://"
-        );
+  `wss://${subdomain}.hasura.${region}.nhost.run/v1/graphql`;
 
-    const client =
-      createClient({
-        url: wsUrl,
+    const client = createClient({
+      url: wsUrl,
 
-        connectionParams: async () => {
-          const session =
-            nhost.getUserSession();
+      connectionParams: async () => {
+        const session =
+          nhost.getUserSession();
 
-          if (
-            !session?.accessToken
-          ) {
-            throw new Error(
-              "No active Nhost session"
-            );
-          }
+        if (!session?.accessToken) {
+          throw new Error(
+            "No active Nhost session"
+          );
+        }
 
-          return {
+        return {
+          headers: {
             Authorization:
               `Bearer ${session.accessToken}`,
-          };
+          },
+        };
+      },
+
+      retryAttempts: 5,
+
+      on: {
+        connecting: () => {
+          console.log(
+            "GraphQL WebSocket connecting..."
+          );
         },
 
-        retryAttempts: 5,
-      });
+        connected: () => {
+          console.log(
+            "GraphQL WebSocket connected."
+          );
+
+          if (!stopped) {
+            setError(null);
+          }
+        },
+
+        closed: () => {
+          if (!stopped) {
+            setError(
+              "Live updates disconnected."
+            );
+          }
+        },
+
+        error: (wsError) => {
+          console.error(
+            "GraphQL WebSocket error:",
+            wsError
+          );
+        },
+      },
+    });
 
     const unsubscribe =
       client.subscribe<SubscriptionData>(
@@ -101,7 +141,6 @@ export function useStepRunsSubscription(
                 workflow_run_id
                 workflow_step_id
                 status
-                input
                 output
                 error
                 attempt_count
@@ -119,14 +158,27 @@ export function useStepRunsSubscription(
         },
 
         {
-          next: (result) => {
+          next: (
+            result: SubscriptionResult
+          ) => {
             if (stopped) {
               return;
             }
 
-            if (
-              result.data?.step_runs
-            ) {
+            if (result.errors?.length) {
+              console.error(
+                "Subscription GraphQL errors:",
+                result.errors
+              );
+
+              setError(
+                result.errors[0].message
+              );
+
+              return;
+            }
+
+            if (result.data?.step_runs) {
               setStepRuns(
                 result.data.step_runs
               );
@@ -135,20 +187,26 @@ export function useStepRunsSubscription(
             setError(null);
           },
 
-          error: (subscriptionError) => {
-            if (stopped) {
-              return;
-            }
+          error: (
+  subscriptionError
+) => {
+  if (stopped) {
+    return;
+  }
 
-            console.error(
-              "Step subscription error:",
-              subscriptionError
-            );
+  console.error(
+    "FULL STEP SUBSCRIPTION ERROR:",
+    JSON.stringify(
+      subscriptionError,
+      null,
+      2
+    )
+  );
 
-            setError(
-              "Live updates disconnected."
-            );
-          },
+  setError(
+    "Live updates disconnected."
+  );
+},
 
           complete: () => {},
         }
