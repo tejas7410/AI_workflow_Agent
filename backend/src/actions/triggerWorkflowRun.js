@@ -66,13 +66,14 @@ const CREATE_RUN = gql`
     $workflowId: uuid!
     $triggerType: String!
     $createdBy: uuid!
+    $startedAt: timestamptz!
   ) {
     insert_workflow_runs_one(
       object: {
         workflow_id: $workflowId
         trigger_type: $triggerType
         status: "running"
-        started_at: "now()"
+        started_at: $startedAt
         created_by: $createdBy
       }
     ) {
@@ -169,10 +170,11 @@ app.post("/", async (req, res) => {
 
     // 8. Create workflow run
     const runResult = await hasura.request(CREATE_RUN, {
-      workflowId,
-      triggerType: "manual",
-      createdBy: userId,
-    });
+  workflowId,
+  triggerType: "manual",
+  createdBy: userId,
+  startedAt: new Date().toISOString(),
+});
 
     const run = runResult.insert_workflow_runs_one;
 
