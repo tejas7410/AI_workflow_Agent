@@ -3,25 +3,39 @@ require("dotenv").config();
 const express = require("express");
 const { GraphQLClient, gql } = require("graphql-request");
 
+const {
+  executeWorkflowRun,
+} = require("../workflowEngine");
+
 const app = express();
 
 app.use(express.json());
 
-const HASURA_GRAPHQL_URL = process.env.HASURA_GRAPHQL_URL;
-const HASURA_ADMIN_SECRET = process.env.HASURA_ADMIN_SECRET;
+const HASURA_GRAPHQL_URL =
+  process.env.HASURA_GRAPHQL_URL;
 
-if (!HASURA_GRAPHQL_URL || !HASURA_ADMIN_SECRET) {
+const HASURA_ADMIN_SECRET =
+  process.env.HASURA_ADMIN_SECRET;
+
+if (
+  !HASURA_GRAPHQL_URL ||
+  !HASURA_ADMIN_SECRET
+) {
   console.error(
     "Missing HASURA_GRAPHQL_URL or HASURA_ADMIN_SECRET"
   );
   process.exit(1);
 }
 
-const hasura = new GraphQLClient(HASURA_GRAPHQL_URL, {
-  headers: {
-    "x-hasura-admin-secret": HASURA_ADMIN_SECRET,
-  },
-});
+const hasura = new GraphQLClient(
+  HASURA_GRAPHQL_URL,
+  {
+    headers: {
+      "x-hasura-admin-secret":
+        HASURA_ADMIN_SECRET,
+    },
+  }
+);
 
 const GET_WORKFLOW = gql`
   query GetWorkflow($workflowId: uuid!) {
@@ -45,7 +59,10 @@ const GET_ORGANIZATION = gql`
 `;
 
 const GET_MEMBERSHIP = gql`
-  query GetMembership($orgId: uuid!, $userId: uuid!) {
+  query GetMembership(
+    $orgId: uuid!
+    $userId: uuid!
+  ) {
     org_members(
       where: {
         org_id: { _eq: $orgId }
@@ -78,32 +95,11 @@ const GET_WORKFLOW_STEPS = gql`
   }
 `;
 
-const GET_RUN_STEP_OUTPUTS = gql`
-  query GetRunStepOutputs($workflowRunId: uuid!) {
-    step_runs(
-      where: {
-        workflow_run_id: { _eq: $workflowRunId }
-      }
-      order_by: {
-        created_at: asc
-      }
-    ) {
-      id
-      workflow_step_id
-      status
-      output
-      workflow_step {
-        type
-      }
-    }
-  }
-`;
-
 const CREATE_RUN = gql`
   mutation CreateRun(
     $workflowId: uuid!
     $triggerType: String!
-    $createdBy: uuid!
+    $createdBy: uuid
     $startedAt: timestamptz!
   ) {
     insert_workflow_runs_one(
@@ -121,122 +117,31 @@ const CREATE_RUN = gql`
   }
 `;
 
-const CREATE_STEP_RUN = gql`
-  mutation CreateStepRun(
-    $workflowRunId: uuid!
-    $workflowStepId: uuid!
-    $input: jsonb
-    $startedAt: timestamptz!
-  ) {
-    insert_step_runs_one(
-      object: {
-        workflow_run_id: $workflowRunId
-        workflow_step_id: $workflowStepId
-        status: "running"
-        input: $input
-        started_at: $startedAt
+const RESERVE_QUOTA = gql`
+  mutation ReserveQuota($orgId: uuid!) {
+    update_organizations(
+      where: {
+        id: { _eq: $orgId }
+        calls_used: {
+          _lt: calls_allowed
+        }
+      }
+      _inc: {
+        calls_used: 1
       }
     ) {
-      id
-      status
+      affected_rows
+      returning {
+        id
+        calls_used
+        calls_allowed
+      }
     }
   }
 `;
 
-const COMPLETE_STEP_RUN = gql`
-  mutation CompleteStepRun(
-    $id: uuid!
-    $output: jsonb
-    $completedAt: timestamptz!
-  ) {
-    update_step_runs_by_pk(
-      pk_columns: { id: $id }
-      _set: {
-        status: "completed"
-        output: $output
-        completed_at: $completedAt
-      }
-    ) {
-      id
-      status
-      output
-      completed_at
-    }
-  }
-`;
-
-const PAUSE_STEP_RUN = gql`
-  mutation PauseStepRun(
-    $id: uuid!
-    $output: jsonb
-  ) {
-    update_step_runs_by_pk(
-      pk_columns: { id: $id }
-      _set: {
-        status: "paused"
-        output: $output
-      }
-    ) {
-      id
-      status
-      output
-    }
-  }
-`;
-
-const COMPLETE_WORKFLOW_RUN = gql`
-  mutation CompleteWorkflowRun(
-    $id: uuid!
-    $completedAt: timestamptz!
-  ) {
-    update_workflow_runs_by_pk(
-      pk_columns: { id: $id }
-      _set: {
-        status: "completed"
-        completed_at: $completedAt
-      }
-    ) {
-      id
-      status
-    }
-  }
-`;
-
-const PAUSE_WORKFLOW_RUN = gql`
-  mutation PauseWorkflowRun(
-    $id: uuid!
-    $pausedAt: timestamptz!
-  ) {
-    update_workflow_runs_by_pk(
-      pk_columns: { id: $id }
-      _set: {
-        status: "paused"
-        paused_at: $pausedAt
-      }
-    ) {
-      id
-      status
-    }
-  }
-`;
-
-const RESUME_WORKFLOW_RUN = gql`
-  mutation ResumeWorkflowRun($id: uuid!) {
-    update_workflow_runs_by_pk(
-      pk_columns: { id: $id }
-      _set: {
-        status: "running"
-        paused_at: null
-      }
-    ) {
-      id
-      status
-    }
-  }
-`;
-
-const FAIL_WORKFLOW_RUN = gql`
-  mutation FailWorkflowRun(
+const FAIL_RUN = gql`
+  mutation FailRun(
     $id: uuid!
     $error: String!
   ) {
@@ -249,334 +154,9 @@ const FAIL_WORKFLOW_RUN = gql`
     ) {
       id
       status
-      error
     }
   }
 `;
-
-async function executeHttpRequest(config) {
-  const method = config.method || "GET";
-  const url = config.url;
-
-  if (!url) {
-    throw new Error("http_request requires config.url");
-  }
-
-  const options = {
-    method,
-    headers: config.headers || {},
-  };
-
-  if (
-    config.body !== undefined &&
-    method !== "GET" &&
-    method !== "HEAD"
-  ) {
-    options.body =
-      typeof config.body === "string"
-        ? config.body
-        : JSON.stringify(config.body);
-
-    if (!options.headers["Content-Type"]) {
-      options.headers["Content-Type"] =
-        "application/json";
-    }
-  }
-
-  const response = await fetch(url, options);
-
-  const text = await response.text();
-
-  let body;
-
-  try {
-    body = JSON.parse(text);
-  } catch {
-    body = text;
-  }
-
-  if (!response.ok) {
-    throw new Error(
-      `HTTP request failed with status ${response.status}`
-    );
-  }
-
-  return {
-    status: response.status,
-    body,
-  };
-}
-
-function evaluateConditional(config, previousOutput) {
-  const source =
-    config.source || "previous.output.text";
-
-  let value = previousOutput;
-
-  if (source === "previous.output.text") {
-    value = previousOutput?.text;
-  }
-
-  if (config.condition === "contains") {
-    return String(value || "").includes(
-      String(config.value || "")
-    );
-  }
-
-  if (config.condition === "equals") {
-    return value === config.value;
-  }
-
-  throw new Error(
-    `Unsupported conditional condition: ${config.condition}`
-  );
-}
-
-async function executeWorkflowSteps(
-  workflowRunId,
-  steps,
-  startIndex,
-  initialLastLlmOutput = null
-) {
-  let lastLlmOutput = initialLastLlmOutput;
-
-  for (let index = startIndex; index < steps.length; index++) {
-    const step = steps[index];
-
-    const stepStartedAt =
-      new Date().toISOString();
-
-    const stepRunResult =
-      await hasura.request(
-        CREATE_STEP_RUN,
-        {
-          workflowRunId,
-          workflowStepId: step.id,
-          input: step.config,
-          startedAt: stepStartedAt,
-        }
-      );
-
-    const stepRun =
-      stepRunResult.insert_step_runs_one;
-
-    let output;
-
-    // LLM
-    if (
-      step.type === "llm_call" &&
-      step.config?.provider === "test"
-    ) {
-      output = {
-        provider: "test",
-        model:
-          step.config.model || null,
-        prompt:
-          step.config.prompt || "",
-        text: "Hello from the test LLM",
-      };
-
-      lastLlmOutput = output;
-    }
-
-    // HTTP
-    else if (
-      step.type === "http_request"
-    ) {
-      output =
-        await executeHttpRequest(
-          step.config || {}
-        );
-    }
-
-    // Conditional
-    else if (
-      step.type === "conditional_branch"
-    ) {
-      const result =
-        evaluateConditional(
-          step.config || {},
-          lastLlmOutput
-        );
-
-      output = {
-        condition_met: result,
-        source:
-          step.config?.source || null,
-        value:
-          step.config?.value || null,
-      };
-
-      if (!result) {
-        await hasura.request(
-          COMPLETE_STEP_RUN,
-          {
-            id: stepRun.id,
-            output,
-            completedAt:
-              new Date().toISOString(),
-          }
-        );
-
-        const completedRun =
-          await hasura.request(
-            COMPLETE_WORKFLOW_RUN,
-            {
-              id: workflowRunId,
-              completedAt:
-                new Date().toISOString(),
-            }
-          );
-
-        return {
-          status:
-            completedRun
-              .update_workflow_runs_by_pk
-              .status,
-        };
-      }
-    }
-
-    // Approval gate
-    else if (
-      step.type === "approval_gate"
-    ) {
-      output = {
-        message:
-          step.config?.message ||
-          "Approval required",
-      };
-
-      await hasura.request(
-        PAUSE_STEP_RUN,
-        {
-          id: stepRun.id,
-          output,
-        }
-      );
-
-      await hasura.request(
-        PAUSE_WORKFLOW_RUN,
-        {
-          id: workflowRunId,
-          pausedAt:
-            new Date().toISOString(),
-        }
-      );
-
-      return {
-        status: "paused",
-        waiting_for_approval:
-          stepRun.id,
-      };
-    }
-
-    else {
-      throw new Error(
-        `Step type not implemented: ${step.type}`
-      );
-    }
-
-    await hasura.request(
-      COMPLETE_STEP_RUN,
-      {
-        id: stepRun.id,
-        output,
-        completedAt:
-          new Date().toISOString(),
-      }
-    );
-  }
-
-  const completedRun =
-    await hasura.request(
-      COMPLETE_WORKFLOW_RUN,
-      {
-        id: workflowRunId,
-        completedAt:
-          new Date().toISOString(),
-      }
-    );
-
-  return {
-    status:
-      completedRun
-        .update_workflow_runs_by_pk
-        .status,
-  };
-}
-
-async function resumeWorkflowRun(
-  workflowRunId,
-  workflowId,
-  approvedStepId
-) {
-  const stepsResult =
-    await hasura.request(
-      GET_WORKFLOW_STEPS,
-      {
-        workflowId,
-      }
-    );
-
-  const steps =
-    stepsResult.workflow_steps;
-
-  if (!steps || steps.length === 0) {
-    throw new Error(
-      "Workflow has no steps"
-    );
-  }
-
-  const approvedIndex =
-    steps.findIndex(
-      (step) => step.id === approvedStepId
-    );
-
-  if (approvedIndex === -1) {
-    throw new Error(
-      "Approved step does not belong to workflow"
-    );
-  }
-
-  const previousRunsResult =
-    await hasura.request(
-      GET_RUN_STEP_OUTPUTS,
-      {
-        workflowRunId,
-      }
-    );
-
-  let lastLlmOutput = null;
-
-  for (
-    const previousRun
-    of previousRunsResult.step_runs
-  ) {
-    if (
-      previousRun.workflow_step?.type ===
-        "llm_call" &&
-      previousRun.output
-    ) {
-      lastLlmOutput =
-        previousRun.output;
-    }
-  }
-
-  await hasura.request(
-    RESUME_WORKFLOW_RUN,
-    {
-      id: workflowRunId,
-    }
-  );
-
-  return executeWorkflowSteps(
-    workflowRunId,
-    steps,
-    approvedIndex + 1,
-    lastLlmOutput
-  );
-}
 
 app.post("/", async (req, res) => {
   let workflowRunId = null;
@@ -586,10 +166,16 @@ app.post("/", async (req, res) => {
       req.body.session_variables || {};
 
     const userId =
-      sessionVariables["x-hasura-user-id"];
+      sessionVariables[
+        "x-hasura-user-id"
+      ];
 
     const workflowId =
       req.body.input?.workflow_id;
+
+    // ---------------------------------
+    // Authentication
+    // ---------------------------------
 
     if (!userId) {
       return res.status(401).json({
@@ -597,11 +183,20 @@ app.post("/", async (req, res) => {
       });
     }
 
+    // ---------------------------------
+    // Input
+    // ---------------------------------
+
     if (!workflowId) {
       return res.status(400).json({
-        message: "workflow_id is required",
+        message:
+          "workflow_id is required",
       });
     }
+
+    // ---------------------------------
+    // Workflow
+    // ---------------------------------
 
     const workflowResult =
       await hasura.request(
@@ -620,6 +215,17 @@ app.post("/", async (req, res) => {
       });
     }
 
+    if (workflow.status !== "active") {
+      return res.status(400).json({
+        message:
+          "Only active workflows can run",
+      });
+    }
+
+    // ---------------------------------
+    // Organization
+    // ---------------------------------
+
     const organizationResult =
       await hasura.request(
         GET_ORGANIZATION,
@@ -634,9 +240,14 @@ app.post("/", async (req, res) => {
 
     if (!organization) {
       return res.status(404).json({
-        message: "Organization not found",
+        message:
+          "Organization not found",
       });
     }
+
+    // ---------------------------------
+    // Membership
+    // ---------------------------------
 
     const membershipResult =
       await hasura.request(
@@ -667,15 +278,31 @@ app.post("/", async (req, res) => {
       });
     }
 
+    // ---------------------------------
+    // Atomic quota reservation
+    // ---------------------------------
+
+    const quotaResult =
+      await hasura.request(
+        RESERVE_QUOTA,
+        {
+          orgId: workflow.org_id,
+        }
+      );
+
     if (
-      organization.calls_used >=
-      organization.calls_allowed
+      quotaResult.update_organizations
+        .affected_rows !== 1
     ) {
       return res.status(403).json({
         message:
           "Organization quota exhausted",
       });
     }
+
+    // ---------------------------------
+    // Steps
+    // ---------------------------------
 
     const stepsResult =
       await hasura.request(
@@ -688,11 +315,16 @@ app.post("/", async (req, res) => {
     const steps =
       stepsResult.workflow_steps;
 
-    if (!steps || steps.length === 0) {
+    if (!steps.length) {
       return res.status(400).json({
-        message: "Workflow has no steps",
+        message:
+          "Workflow has no steps",
       });
     }
+
+    // ---------------------------------
+    // Create run
+    // ---------------------------------
 
     const runResult =
       await hasura.request(
@@ -711,21 +343,24 @@ app.post("/", async (req, res) => {
 
     workflowRunId = run.id;
 
-    const result =
-      await executeWorkflowSteps(
+    // ---------------------------------
+    // Execute
+    // ---------------------------------
+
+    const execution =
+      await executeWorkflowRun(
+        hasura,
         run.id,
-        steps,
-        0,
-        null
+        steps
       );
 
     return res.json({
       workflow_run_id: run.id,
-      status: result.status,
-      ...(result.waiting_for_approval
+      status: execution.status,
+      ...(execution.waitingForApproval
         ? {
             waiting_for_approval:
-              result.waiting_for_approval,
+              execution.waitingForApproval,
           }
         : {}),
     });
@@ -738,7 +373,7 @@ app.post("/", async (req, res) => {
     if (workflowRunId) {
       try {
         await hasura.request(
-          FAIL_WORKFLOW_RUN,
+          FAIL_RUN,
           {
             id: workflowRunId,
             error:
@@ -746,10 +381,10 @@ app.post("/", async (req, res) => {
               "Workflow execution failed",
           }
         );
-      } catch (updateError) {
+      } catch (failureError) {
         console.error(
-          "Failed to mark workflow run failed:",
-          updateError
+          "Failed to mark run failed:",
+          failureError
         );
       }
     }
@@ -763,5 +398,3 @@ app.post("/", async (req, res) => {
 });
 
 module.exports = app;
-module.exports.resumeWorkflowRun =
-  resumeWorkflowRun;
