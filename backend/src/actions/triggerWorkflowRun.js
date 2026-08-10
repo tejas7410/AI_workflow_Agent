@@ -7,8 +7,6 @@ const app = express();
 
 app.use(express.json());
 
-const PORT = process.env.PORT || 4000;
-
 const HASURA_GRAPHQL_URL = process.env.HASURA_GRAPHQL_URL;
 const HASURA_ADMIN_SECRET = process.env.HASURA_ADMIN_SECRET;
 
@@ -61,6 +59,25 @@ const GET_MEMBERSHIP = gql`
   }
 `;
 
+const GET_WORKFLOW_STEPS = gql`
+  query GetWorkflowSteps($workflowId: uuid!) {
+    workflow_steps(
+      where: {
+        workflow_id: { _eq: $workflowId }
+      }
+      order_by: {
+        step_order: asc
+      }
+    ) {
+      id
+      step_order
+      name
+      type
+      config
+    }
+  }
+`;
+
 const CREATE_RUN = gql`
   mutation CreateRun(
     $workflowId: uuid!
@@ -83,12 +100,106 @@ const CREATE_RUN = gql`
   }
 `;
 
-app.post("/", async (req, res) => {
-  try {
-    const sessionVariables = req.body.session_variables || {};
+const CREATE_STEP_RUN = gql`
+  mutation CreateStepRun(
+    $workflowRunId: uuid!
+    $workflowStepId: uuid!
+    $input: jsonb
+    $startedAt: timestamptz!
+  ) {
+    insert_step_runs_one(
+      object: {
+        workflow_run_id: $workflowRunId
+        workflow_step_id: $workflowStepId
+        status: "running"
+        input: $input
+        started_at: $startedAt
+      }
+    ) {
+      id
+      status
+    }
+  }
+`;
 
-    const userId = sessionVariables["x-hasura-user-id"];
-    const workflowId = req.body.input?.workflow_id;
+const COMPLETE_STEP_RUN = gql`
+  mutation CompleteStepRun(
+    $id: uuid!
+    $output: jsonb
+    $completedAt: timestamptz!
+  ) {
+    update_step_runs_by_pk(
+      pk_columns: {
+        id: $id
+      }
+      _set: {
+        status: "completed"
+        output: $output
+        completed_at: $completedAt
+      }
+    ) {
+      id
+      status
+      output
+      completed_at
+    }
+  }
+`;
+
+const COMPLETE_WORKFLOW_RUN = gql`
+  mutation CompleteWorkflowRun(
+    $id: uuid!
+    $completedAt: timestamptz!
+  ) {
+    update_workflow_runs_by_pk(
+      pk_columns: {
+        id: $id
+      }
+      _set: {
+        status: "completed"
+        completed_at: $completedAt
+      }
+    ) {
+      id
+      status
+      completed_at
+    }
+  }
+`;
+
+const FAIL_WORKFLOW_RUN = gql`
+  mutation FailWorkflowRun(
+    $id: uuid!
+    $error: String!
+  ) {
+    update_workflow_runs_by_pk(
+      pk_columns: {
+        id: $id
+      }
+      _set: {
+        status: "failed"
+        error: $error
+      }
+    ) {
+      id
+      status
+      error
+    }
+  }
+`;
+
+app.post("/", async (req, res) => {
+  let workflowRunId = null;
+
+  try {
+    const sessionVariables =
+      req.body.session_variables || {};
+
+    const userId =
+      sessionVariables["x-hasura-user-id"];
+
+    const workflowId =
+      req.body.input?.workflow_id;
 
     // 1. Authentication
     if (!userId) {
@@ -105,11 +216,15 @@ app.post("/", async (req, res) => {
     }
 
     // 3. Resolve workflow
-    const workflowResult = await hasura.request(GET_WORKFLOW, {
-      workflowId,
-    });
+    const workflowResult = await hasura.request(
+      GET_WORKFLOW,
+      {
+        workflowId,
+      }
+    );
 
-    const workflow = workflowResult.workflows_by_pk;
+    const workflow =
+      workflowResult.workflows_by_pk;
 
     if (!workflow) {
       return res.status(404).json({
@@ -118,12 +233,13 @@ app.post("/", async (req, res) => {
     }
 
     // 4. Resolve organization
-    const organizationResult = await hasura.request(
-      GET_ORGANIZATION,
-      {
-        orgId: workflow.org_id,
-      }
-    );
+    const organizationResult =
+      await hasura.request(
+        GET_ORGANIZATION,
+        {
+          orgId: workflow.org_id,
+        }
+      );
 
     const organization =
       organizationResult.organizations_by_pk;
@@ -135,24 +251,31 @@ app.post("/", async (req, res) => {
     }
 
     // 5. Check organization membership
-    const membershipResult = await hasura.request(
-      GET_MEMBERSHIP,
-      {
-        orgId: workflow.org_id,
-        userId,
-      }
-    );
+    const membershipResult =
+      await hasura.request(
+        GET_MEMBERSHIP,
+        {
+          orgId: workflow.org_id,
+          userId,
+        }
+      );
 
-    const membership = membershipResult.org_members[0];
+    const membership =
+      membershipResult.org_members[0];
 
     if (!membership) {
       return res.status(403).json({
-        message: "Not a member of this organization",
+        message:
+          "Not a member of this organization",
       });
     }
 
     // 6. Check role
-    if (!["owner", "editor"].includes(membership.role)) {
+    if (
+      !["owner", "editor"].includes(
+        membership.role
+      )
+    ) {
       return res.status(403).json({
         message: "Insufficient role",
       });
@@ -164,29 +287,150 @@ app.post("/", async (req, res) => {
       organization.calls_allowed
     ) {
       return res.status(403).json({
-        message: "Organization quota exhausted",
+        message:
+          "Organization quota exhausted",
       });
     }
 
-    // 8. Create workflow run
-    const runResult = await hasura.request(CREATE_RUN, {
-  workflowId,
-  triggerType: "manual",
-  createdBy: userId,
-  startedAt: new Date().toISOString(),
-});
+    // 8. Load workflow steps
+    const stepsResult =
+      await hasura.request(
+        GET_WORKFLOW_STEPS,
+        {
+          workflowId,
+        }
+      );
 
-    const run = runResult.insert_workflow_runs_one;
+    const steps =
+      stepsResult.workflow_steps;
+
+    if (!steps || steps.length === 0) {
+      return res.status(400).json({
+        message:
+          "Workflow has no steps",
+      });
+    }
+
+    // 9. Create workflow run
+    const startedAt =
+      new Date().toISOString();
+
+    const runResult =
+      await hasura.request(
+        CREATE_RUN,
+        {
+          workflowId,
+          triggerType: "manual",
+          createdBy: userId,
+          startedAt,
+        }
+      );
+
+    const run =
+      runResult.insert_workflow_runs_one;
+
+    workflowRunId = run.id;
+
+    // 10. Execute steps in order
+    for (const step of steps) {
+      const stepStartedAt =
+        new Date().toISOString();
+
+      const stepRunResult =
+        await hasura.request(
+          CREATE_STEP_RUN,
+          {
+            workflowRunId: run.id,
+            workflowStepId: step.id,
+            input: step.config,
+            startedAt: stepStartedAt,
+          }
+        );
+
+      const stepRun =
+        stepRunResult.insert_step_runs_one;
+
+      // Temporary deterministic test adapter.
+      if (
+        step.type === "llm_call" &&
+        step.config?.provider === "test"
+      ) {
+        const output = {
+          provider: "test",
+          model: step.config.model || null,
+          prompt: step.config.prompt || "",
+          text: "Hello from the test LLM",
+        };
+
+        await hasura.request(
+          COMPLETE_STEP_RUN,
+          {
+            id: stepRun.id,
+            output,
+            completedAt:
+              new Date().toISOString(),
+          }
+        );
+
+        continue;
+      }
+
+      // We have not implemented other step types yet.
+      throw new Error(
+        `Step type not implemented yet: ${step.type}`
+      );
+    }
+
+    // 11. All steps completed
+    const completedRun =
+      await hasura.request(
+        COMPLETE_WORKFLOW_RUN,
+        {
+          id: run.id,
+          completedAt:
+            new Date().toISOString(),
+        }
+      );
 
     return res.json({
-      workflow_run_id: run.id,
-      status: run.status,
+      workflow_run_id:
+        completedRun
+          .update_workflow_runs_by_pk.id,
+      status:
+        completedRun
+          .update_workflow_runs_by_pk.status,
     });
   } catch (error) {
-    console.error(error);
+    console.error(
+      "triggerWorkflowRun error:",
+      error
+    );
+
+    // If a workflow run was already created,
+    // mark it failed.
+    if (workflowRunId) {
+      try {
+        await hasura.request(
+          FAIL_WORKFLOW_RUN,
+          {
+            id: workflowRunId,
+            error:
+              error.message ||
+              "Workflow execution failed",
+          }
+        );
+      } catch (updateError) {
+        console.error(
+          "Failed to mark workflow run failed:",
+          updateError
+        );
+      }
+    }
 
     return res.status(500).json({
-      message: "Failed to start workflow run",
+      message:
+        error.message ||
+        "Failed to execute workflow",
     });
   }
 });
