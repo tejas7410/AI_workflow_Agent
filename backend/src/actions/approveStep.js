@@ -3,23 +3,39 @@ require("dotenv").config();
 const express = require("express");
 const { GraphQLClient, gql } = require("graphql-request");
 
+const {
+  resumeWorkflowRun,
+} = require("./triggerWorkflowRun");
+
 const app = express();
 
 app.use(express.json());
 
-const HASURA_GRAPHQL_URL = process.env.HASURA_GRAPHQL_URL;
-const HASURA_ADMIN_SECRET = process.env.HASURA_ADMIN_SECRET;
+const HASURA_GRAPHQL_URL =
+  process.env.HASURA_GRAPHQL_URL;
 
-if (!HASURA_GRAPHQL_URL || !HASURA_ADMIN_SECRET) {
-  console.error("Missing Hasura environment variables");
+const HASURA_ADMIN_SECRET =
+  process.env.HASURA_ADMIN_SECRET;
+
+if (
+  !HASURA_GRAPHQL_URL ||
+  !HASURA_ADMIN_SECRET
+) {
+  console.error(
+    "Missing Hasura environment variables"
+  );
   process.exit(1);
 }
 
-const hasura = new GraphQLClient(HASURA_GRAPHQL_URL, {
-  headers: {
-    "x-hasura-admin-secret": HASURA_ADMIN_SECRET,
-  },
-});
+const hasura = new GraphQLClient(
+  HASURA_GRAPHQL_URL,
+  {
+    headers: {
+      "x-hasura-admin-secret":
+        HASURA_ADMIN_SECRET,
+    },
+  }
+);
 
 const GET_STEP_RUN = gql`
   query GetStepRun($stepRunId: uuid!) {
@@ -37,12 +53,19 @@ const GET_STEP_RUN = gql`
           org_id
         }
       }
+      workflow_run {
+        id
+        status
+      }
     }
   }
 `;
 
 const GET_MEMBERSHIP = gql`
-  query GetMembership($orgId: uuid!, $userId: uuid!) {
+  query GetMembership(
+    $orgId: uuid!
+    $userId: uuid!
+  ) {
     org_members(
       where: {
         org_id: { _eq: $orgId }
@@ -80,38 +103,40 @@ const APPROVE_STEP = gql`
 
 app.post("/", async (req, res) => {
   try {
-    console.log(
-  "APPROVE STEP BODY:",
-  JSON.stringify(req.body)
-);
     const sessionVariables =
       req.body.session_variables || {};
 
     const userId =
-      sessionVariables["x-hasura-user-id"];
+      sessionVariables[
+        "x-hasura-user-id"
+      ];
 
     const stepRunId =
       req.body.input?.step_run_id;
 
-    // Authentication
+    // 1. Authentication
     if (!userId) {
       return res.status(401).json({
         message: "Unauthenticated",
       });
     }
 
-    // Input validation
+    // 2. Input validation
     if (!stepRunId) {
       return res.status(400).json({
-        message: "step_run_id is required",
+        message:
+          "step_run_id is required",
       });
     }
 
-    // Load step run
+    // 3. Load step run
     const stepResult =
-      await hasura.request(GET_STEP_RUN, {
-        stepRunId,
-      });
+      await hasura.request(
+        GET_STEP_RUN,
+        {
+          stepRunId,
+        }
+      );
 
     const stepRun =
       stepResult.step_runs_by_pk;
@@ -122,7 +147,18 @@ app.post("/", async (req, res) => {
       });
     }
 
-    // Must currently be paused
+    // 4. Workflow must currently be paused
+    if (
+      stepRun.workflow_run.status !==
+      "paused"
+    ) {
+      return res.status(400).json({
+        message:
+          "Workflow run is not paused",
+      });
+    }
+
+    // 5. Step must currently be paused
     if (stepRun.status !== "paused") {
       return res.status(400).json({
         message:
@@ -130,7 +166,7 @@ app.post("/", async (req, res) => {
       });
     }
 
-    // Must be an approval gate
+    // 6. Must be an approval gate
     if (
       stepRun.workflow_step.type !==
       "approval_gate"
@@ -141,16 +177,19 @@ app.post("/", async (req, res) => {
       });
     }
 
-    // Resolve organization
+    // 7. Resolve organization
     const orgId =
       stepRun.workflow_step.workflow.org_id;
 
-    // Check organization membership
+    // 8. Verify organization membership
     const membershipResult =
-      await hasura.request(GET_MEMBERSHIP, {
-        orgId,
-        userId,
-      });
+      await hasura.request(
+        GET_MEMBERSHIP,
+        {
+          orgId,
+          userId,
+        }
+      );
 
     const membership =
       membershipResult.org_members[0];
@@ -162,7 +201,7 @@ app.post("/", async (req, res) => {
       });
     }
 
-    // Only owner/editor can approve
+    // 9. Only owner/editor can approve
     if (
       !["owner", "editor"].includes(
         membership.role
@@ -173,27 +212,45 @@ app.post("/", async (req, res) => {
       });
     }
 
-    // Approve
+    // 10. Approve the step
     const approvedAt =
       new Date().toISOString();
 
     const result =
-      await hasura.request(APPROVE_STEP, {
-        id: stepRunId,
-        approvedBy: userId,
-        approvedAt,
-      });
+      await hasura.request(
+        APPROVE_STEP,
+        {
+          id: stepRunId,
+          approvedBy: userId,
+          approvedAt,
+        }
+      );
 
     const approvedStep =
       result.update_step_runs_by_pk;
 
+    // 11. Resume the SAME workflow run.
+    //
+    // We pass the approved workflow step ID so
+    // execution starts at the next ordered step.
+    const resumeResult =
+      await resumeWorkflowRun(
+        stepRun.workflow_run_id,
+        stepRun.workflow_step.workflow_id,
+        stepRun.workflow_step_id
+      );
+
     return res.json({
-      step_run_id: approvedStep.id,
-      status: approvedStep.status,
+      step_run_id:
+        approvedStep.id,
+      status:
+        approvedStep.status,
       approved_by:
         approvedStep.approved_by,
       approved_at:
         approvedStep.approved_at,
+      workflow_run_status:
+        resumeResult.status,
     });
   } catch (error) {
     console.error(

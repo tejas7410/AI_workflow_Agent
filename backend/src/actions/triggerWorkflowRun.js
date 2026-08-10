@@ -78,6 +78,27 @@ const GET_WORKFLOW_STEPS = gql`
   }
 `;
 
+const GET_RUN_STEP_OUTPUTS = gql`
+  query GetRunStepOutputs($workflowRunId: uuid!) {
+    step_runs(
+      where: {
+        workflow_run_id: { _eq: $workflowRunId }
+      }
+      order_by: {
+        created_at: asc
+      }
+    ) {
+      id
+      workflow_step_id
+      status
+      output
+      workflow_step {
+        type
+      }
+    }
+  }
+`;
+
 const CREATE_RUN = gql`
   mutation CreateRun(
     $workflowId: uuid!
@@ -199,6 +220,21 @@ const PAUSE_WORKFLOW_RUN = gql`
   }
 `;
 
+const RESUME_WORKFLOW_RUN = gql`
+  mutation ResumeWorkflowRun($id: uuid!) {
+    update_workflow_runs_by_pk(
+      pk_columns: { id: $id }
+      _set: {
+        status: "running"
+        paused_at: null
+      }
+    ) {
+      id
+      status
+    }
+  }
+`;
+
 const FAIL_WORKFLOW_RUN = gql`
   mutation FailWorkflowRun(
     $id: uuid!
@@ -271,8 +307,15 @@ async function executeHttpRequest(config) {
   };
 }
 
-function evaluateConditional(config, llmOutput) {
-  const value = llmOutput?.text;
+function evaluateConditional(config, previousOutput) {
+  const source =
+    config.source || "previous.output.text";
+
+  let value = previousOutput;
+
+  if (source === "previous.output.text") {
+    value = previousOutput?.text;
+  }
 
   if (config.condition === "contains") {
     return String(value || "").includes(
@@ -289,6 +332,252 @@ function evaluateConditional(config, llmOutput) {
   );
 }
 
+async function executeWorkflowSteps(
+  workflowRunId,
+  steps,
+  startIndex,
+  initialLastLlmOutput = null
+) {
+  let lastLlmOutput = initialLastLlmOutput;
+
+  for (let index = startIndex; index < steps.length; index++) {
+    const step = steps[index];
+
+    const stepStartedAt =
+      new Date().toISOString();
+
+    const stepRunResult =
+      await hasura.request(
+        CREATE_STEP_RUN,
+        {
+          workflowRunId,
+          workflowStepId: step.id,
+          input: step.config,
+          startedAt: stepStartedAt,
+        }
+      );
+
+    const stepRun =
+      stepRunResult.insert_step_runs_one;
+
+    let output;
+
+    // LLM
+    if (
+      step.type === "llm_call" &&
+      step.config?.provider === "test"
+    ) {
+      output = {
+        provider: "test",
+        model:
+          step.config.model || null,
+        prompt:
+          step.config.prompt || "",
+        text: "Hello from the test LLM",
+      };
+
+      lastLlmOutput = output;
+    }
+
+    // HTTP
+    else if (
+      step.type === "http_request"
+    ) {
+      output =
+        await executeHttpRequest(
+          step.config || {}
+        );
+    }
+
+    // Conditional
+    else if (
+      step.type === "conditional_branch"
+    ) {
+      const result =
+        evaluateConditional(
+          step.config || {},
+          lastLlmOutput
+        );
+
+      output = {
+        condition_met: result,
+        source:
+          step.config?.source || null,
+        value:
+          step.config?.value || null,
+      };
+
+      if (!result) {
+        await hasura.request(
+          COMPLETE_STEP_RUN,
+          {
+            id: stepRun.id,
+            output,
+            completedAt:
+              new Date().toISOString(),
+          }
+        );
+
+        const completedRun =
+          await hasura.request(
+            COMPLETE_WORKFLOW_RUN,
+            {
+              id: workflowRunId,
+              completedAt:
+                new Date().toISOString(),
+            }
+          );
+
+        return {
+          status:
+            completedRun
+              .update_workflow_runs_by_pk
+              .status,
+        };
+      }
+    }
+
+    // Approval gate
+    else if (
+      step.type === "approval_gate"
+    ) {
+      output = {
+        message:
+          step.config?.message ||
+          "Approval required",
+      };
+
+      await hasura.request(
+        PAUSE_STEP_RUN,
+        {
+          id: stepRun.id,
+          output,
+        }
+      );
+
+      await hasura.request(
+        PAUSE_WORKFLOW_RUN,
+        {
+          id: workflowRunId,
+          pausedAt:
+            new Date().toISOString(),
+        }
+      );
+
+      return {
+        status: "paused",
+        waiting_for_approval:
+          stepRun.id,
+      };
+    }
+
+    else {
+      throw new Error(
+        `Step type not implemented: ${step.type}`
+      );
+    }
+
+    await hasura.request(
+      COMPLETE_STEP_RUN,
+      {
+        id: stepRun.id,
+        output,
+        completedAt:
+          new Date().toISOString(),
+      }
+    );
+  }
+
+  const completedRun =
+    await hasura.request(
+      COMPLETE_WORKFLOW_RUN,
+      {
+        id: workflowRunId,
+        completedAt:
+          new Date().toISOString(),
+      }
+    );
+
+  return {
+    status:
+      completedRun
+        .update_workflow_runs_by_pk
+        .status,
+  };
+}
+
+async function resumeWorkflowRun(
+  workflowRunId,
+  workflowId,
+  approvedStepId
+) {
+  const stepsResult =
+    await hasura.request(
+      GET_WORKFLOW_STEPS,
+      {
+        workflowId,
+      }
+    );
+
+  const steps =
+    stepsResult.workflow_steps;
+
+  if (!steps || steps.length === 0) {
+    throw new Error(
+      "Workflow has no steps"
+    );
+  }
+
+  const approvedIndex =
+    steps.findIndex(
+      (step) => step.id === approvedStepId
+    );
+
+  if (approvedIndex === -1) {
+    throw new Error(
+      "Approved step does not belong to workflow"
+    );
+  }
+
+  const previousRunsResult =
+    await hasura.request(
+      GET_RUN_STEP_OUTPUTS,
+      {
+        workflowRunId,
+      }
+    );
+
+  let lastLlmOutput = null;
+
+  for (
+    const previousRun
+    of previousRunsResult.step_runs
+  ) {
+    if (
+      previousRun.workflow_step?.type ===
+        "llm_call" &&
+      previousRun.output
+    ) {
+      lastLlmOutput =
+        previousRun.output;
+    }
+  }
+
+  await hasura.request(
+    RESUME_WORKFLOW_RUN,
+    {
+      id: workflowRunId,
+    }
+  );
+
+  return executeWorkflowSteps(
+    workflowRunId,
+    steps,
+    approvedIndex + 1,
+    lastLlmOutput
+  );
+}
+
 app.post("/", async (req, res) => {
   let workflowRunId = null;
 
@@ -302,25 +591,25 @@ app.post("/", async (req, res) => {
     const workflowId =
       req.body.input?.workflow_id;
 
-    // 1. Authentication
     if (!userId) {
       return res.status(401).json({
         message: "Unauthenticated",
       });
     }
 
-    // 2. Validate input
     if (!workflowId) {
       return res.status(400).json({
         message: "workflow_id is required",
       });
     }
 
-    // 3. Resolve workflow
     const workflowResult =
-      await hasura.request(GET_WORKFLOW, {
-        workflowId,
-      });
+      await hasura.request(
+        GET_WORKFLOW,
+        {
+          workflowId,
+        }
+      );
 
     const workflow =
       workflowResult.workflows_by_pk;
@@ -331,14 +620,17 @@ app.post("/", async (req, res) => {
       });
     }
 
-    // 4. Resolve organization
     const organizationResult =
-      await hasura.request(GET_ORGANIZATION, {
-        orgId: workflow.org_id,
-      });
+      await hasura.request(
+        GET_ORGANIZATION,
+        {
+          orgId: workflow.org_id,
+        }
+      );
 
     const organization =
-      organizationResult.organizations_by_pk;
+      organizationResult
+        .organizations_by_pk;
 
     if (!organization) {
       return res.status(404).json({
@@ -346,12 +638,14 @@ app.post("/", async (req, res) => {
       });
     }
 
-    // 5. Organization membership
     const membershipResult =
-      await hasura.request(GET_MEMBERSHIP, {
-        orgId: workflow.org_id,
-        userId,
-      });
+      await hasura.request(
+        GET_MEMBERSHIP,
+        {
+          orgId: workflow.org_id,
+          userId,
+        }
+      );
 
     const membership =
       membershipResult.org_members[0];
@@ -363,7 +657,6 @@ app.post("/", async (req, res) => {
       });
     }
 
-    // 6. Role
     if (
       !["owner", "editor"].includes(
         membership.role
@@ -374,7 +667,6 @@ app.post("/", async (req, res) => {
       });
     }
 
-    // 7. Quota
     if (
       organization.calls_used >=
       organization.calls_allowed
@@ -385,11 +677,13 @@ app.post("/", async (req, res) => {
       });
     }
 
-    // 8. Load workflow steps
     const stepsResult =
-      await hasura.request(GET_WORKFLOW_STEPS, {
-        workflowId,
-      });
+      await hasura.request(
+        GET_WORKFLOW_STEPS,
+        {
+          workflowId,
+        }
+      );
 
     const steps =
       stepsResult.workflow_steps;
@@ -400,208 +694,40 @@ app.post("/", async (req, res) => {
       });
     }
 
-    // 9. Create workflow run
     const runResult =
-      await hasura.request(CREATE_RUN, {
-        workflowId,
-        triggerType: "manual",
-        createdBy: userId,
-        startedAt:
-          new Date().toISOString(),
-      });
+      await hasura.request(
+        CREATE_RUN,
+        {
+          workflowId,
+          triggerType: "manual",
+          createdBy: userId,
+          startedAt:
+            new Date().toISOString(),
+        }
+      );
 
     const run =
       runResult.insert_workflow_runs_one;
 
     workflowRunId = run.id;
 
-    // Keep the LLM output available for the
-    // conditional branch.
-    let lastLlmOutput = null;
-
-    // 10. Execute steps in order
-    for (const step of steps) {
-      const stepStartedAt =
-        new Date().toISOString();
-
-      const stepRunResult =
-        await hasura.request(
-          CREATE_STEP_RUN,
-          {
-            workflowRunId: run.id,
-            workflowStepId: step.id,
-            input: step.config,
-            startedAt: stepStartedAt,
-          }
-        );
-
-      const stepRun =
-        stepRunResult.insert_step_runs_one;
-
-      let output;
-
-      // ---------------------------------
-      // LLM CALL
-      // ---------------------------------
-      if (
-        step.type === "llm_call" &&
-        step.config?.provider === "test"
-      ) {
-        output = {
-          provider: "test",
-          model:
-            step.config.model || null,
-          prompt:
-            step.config.prompt || "",
-          text: "Hello from the test LLM",
-        };
-
-        // IMPORTANT:
-        // Do NOT use "let" here.
-        lastLlmOutput = output;
-      }
-
-      // ---------------------------------
-      // HTTP REQUEST
-      // ---------------------------------
-      else if (
-        step.type === "http_request"
-      ) {
-        output =
-          await executeHttpRequest(
-            step.config || {}
-          );
-      }
-
-      // ---------------------------------
-      // CONDITIONAL BRANCH
-      // ---------------------------------
-      else if (
-        step.type === "conditional_branch"
-      ) {
-        const result =
-          evaluateConditional(
-            step.config || {},
-            lastLlmOutput
-          );
-
-        output = {
-          condition_met: result,
-          source:
-            step.config?.source || null,
-          value:
-            step.config?.value || null,
-        };
-
-        // If false and there is no false_next,
-        // complete the workflow here.
-        if (!result) {
-          await hasura.request(
-            COMPLETE_STEP_RUN,
-            {
-              id: stepRun.id,
-              output,
-              completedAt:
-                new Date().toISOString(),
-            }
-          );
-
-          const completedRun =
-            await hasura.request(
-              COMPLETE_WORKFLOW_RUN,
-              {
-                id: run.id,
-                completedAt:
-                  new Date().toISOString(),
-              }
-            );
-
-          return res.json({
-            workflow_run_id:
-              completedRun
-                .update_workflow_runs_by_pk.id,
-            status:
-              completedRun
-                .update_workflow_runs_by_pk.status,
-          });
-        }
-      }
-
-      // ---------------------------------
-      // APPROVAL GATE
-      // ---------------------------------
-      else if (
-        step.type === "approval_gate"
-      ) {
-        output = {
-          message:
-            step.config?.message ||
-            "Approval required",
-        };
-
-        await hasura.request(
-          PAUSE_STEP_RUN,
-          {
-            id: stepRun.id,
-            output,
-          }
-        );
-
-        await hasura.request(
-          PAUSE_WORKFLOW_RUN,
-          {
-            id: run.id,
-            pausedAt:
-              new Date().toISOString(),
-          }
-        );
-
-        return res.json({
-          workflow_run_id: run.id,
-          status: "paused",
-          waiting_for_approval: stepRun.id,
-        });
-      }
-
-      // ---------------------------------
-      // UNSUPPORTED STEP
-      // ---------------------------------
-      else {
-        throw new Error(
-          `Step type not implemented: ${step.type}`
-        );
-      }
-
-      // Save normal step output.
-      await hasura.request(
-        COMPLETE_STEP_RUN,
-        {
-          id: stepRun.id,
-          output,
-          completedAt:
-            new Date().toISOString(),
-        }
-      );
-    }
-
-    // 11. All steps completed
-    const completedRun =
-      await hasura.request(
-        COMPLETE_WORKFLOW_RUN,
-        {
-          id: run.id,
-          completedAt:
-            new Date().toISOString(),
-        }
+    const result =
+      await executeWorkflowSteps(
+        run.id,
+        steps,
+        0,
+        null
       );
 
     return res.json({
-      workflow_run_id:
-        completedRun
-          .update_workflow_runs_by_pk.id,
-      status:
-        completedRun
-          .update_workflow_runs_by_pk.status,
+      workflow_run_id: run.id,
+      status: result.status,
+      ...(result.waiting_for_approval
+        ? {
+            waiting_for_approval:
+              result.waiting_for_approval,
+          }
+        : {}),
     });
   } catch (error) {
     console.error(
@@ -637,3 +763,5 @@ app.post("/", async (req, res) => {
 });
 
 module.exports = app;
+module.exports.resumeWorkflowRun =
+  resumeWorkflowRun;
