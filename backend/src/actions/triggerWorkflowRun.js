@@ -296,15 +296,15 @@ app.post("/", async (req, res) => {
       );
 
     const organization =
-      organizationResult
-        .organizations_by_pk;
+  organizationResult
+    .organizations_by_pk;
 
-    if (!quotaOrganization) {
-      return res.status(404).json({
-        message:
-          "Organization not found",
-      });
-    }
+if (!organization) {
+  return res.status(404).json({
+    message:
+      "Organization not found",
+  });
+}
 
     /*
      * ---------------------------------
