@@ -17,6 +17,9 @@ const HASURA_GRAPHQL_URL =
 const HASURA_ADMIN_SECRET =
   process.env.HASURA_ADMIN_SECRET;
 
+const INTERNAL_TRIGGER_SECRET =
+  process.env.INTERNAL_TRIGGER_SECRET;
+
 if (
   !HASURA_GRAPHQL_URL ||
   !HASURA_ADMIN_SECRET
@@ -38,7 +41,9 @@ const hasura = new GraphQLClient(
 );
 
 const GET_WORKFLOW = gql`
-  query GetWorkflow($workflowId: uuid!) {
+  query GetWorkflow(
+    $workflowId: uuid!
+  ) {
     workflows_by_pk(id: $workflowId) {
       id
       name
@@ -49,7 +54,9 @@ const GET_WORKFLOW = gql`
 `;
 
 const GET_ORGANIZATION = gql`
-  query GetOrganization($orgId: uuid!) {
+  query GetOrganization(
+    $orgId: uuid!
+  ) {
     organizations_by_pk(id: $orgId) {
       id
       calls_used
@@ -65,8 +72,12 @@ const GET_MEMBERSHIP = gql`
   ) {
     org_members(
       where: {
-        org_id: { _eq: $orgId }
-        user_id: { _eq: $userId }
+        org_id: {
+          _eq: $orgId
+        }
+        user_id: {
+          _eq: $userId
+        }
       }
       limit: 1
     ) {
@@ -77,10 +88,14 @@ const GET_MEMBERSHIP = gql`
 `;
 
 const GET_WORKFLOW_STEPS = gql`
-  query GetWorkflowSteps($workflowId: uuid!) {
+  query GetWorkflowSteps(
+    $workflowId: uuid!
+  ) {
     workflow_steps(
       where: {
-        workflow_id: { _eq: $workflowId }
+        workflow_id: {
+          _eq: $workflowId
+        }
       }
       order_by: {
         step_order: asc
@@ -118,10 +133,14 @@ const CREATE_RUN = gql`
 `;
 
 const RESERVE_QUOTA = gql`
-  mutation ReserveQuota($orgId: uuid!) {
+  mutation ReserveQuota(
+    $orgId: uuid!
+  ) {
     update_organizations(
       where: {
-        id: { _eq: $orgId }
+        id: {
+          _eq: $orgId
+        }
         calls_used: {
           _lt: calls_allowed
         }
@@ -146,7 +165,9 @@ const FAIL_RUN = gql`
     $error: String!
   ) {
     update_workflow_runs_by_pk(
-      pk_columns: { id: $id }
+      pk_columns: {
+        id: $id
+      }
       _set: {
         status: "failed"
         error: $error
@@ -162,6 +183,16 @@ app.post("/", async (req, res) => {
   let workflowRunId = null;
 
   try {
+    /*
+     * There are two supported execution paths:
+     *
+     * 1. Normal authenticated user
+     *    Hasura Action -> this endpoint
+     *
+     * 2. Internal webhook trigger
+     *    webhookTrigger -> this endpoint
+     */
+
     const sessionVariables =
       req.body.session_variables || {};
 
@@ -171,21 +202,49 @@ app.post("/", async (req, res) => {
       ];
 
     const workflowId =
-      req.body.input?.workflow_id;
+      req.body.input?.workflow_id ||
+      req.body.workflow_id;
 
-    // ---------------------------------
-    // Authentication
-    // ---------------------------------
+    const internalSecret =
+      req.headers[
+        "x-internal-trigger-secret"
+      ];
 
-    if (!userId) {
+    const isInternalTrigger =
+      Boolean(
+        INTERNAL_TRIGGER_SECRET &&
+        internalSecret &&
+        internalSecret ===
+          INTERNAL_TRIGGER_SECRET
+      );
+
+    /*
+     * ---------------------------------
+     * Authentication
+     * ---------------------------------
+     *
+     * Normal execution requires a logged-in
+     * Hasura user.
+     *
+     * Webhook execution instead requires the
+     * server-to-server internal secret.
+     */
+
+    if (
+      !userId &&
+      !isInternalTrigger
+    ) {
       return res.status(401).json({
-        message: "Unauthenticated",
+        message:
+          "Unauthenticated",
       });
     }
 
-    // ---------------------------------
-    // Input
-    // ---------------------------------
+    /*
+     * ---------------------------------
+     * Input
+     * ---------------------------------
+     */
 
     if (!workflowId) {
       return res.status(400).json({
@@ -194,9 +253,11 @@ app.post("/", async (req, res) => {
       });
     }
 
-    // ---------------------------------
-    // Workflow
-    // ---------------------------------
+    /*
+     * ---------------------------------
+     * Workflow
+     * ---------------------------------
+     */
 
     const workflowResult =
       await hasura.request(
@@ -207,30 +268,38 @@ app.post("/", async (req, res) => {
       );
 
     const workflow =
-      workflowResult.workflows_by_pk;
+      workflowResult
+        .workflows_by_pk;
 
     if (!workflow) {
       return res.status(404).json({
-        message: "Workflow not found",
+        message:
+          "Workflow not found",
       });
     }
 
-    if (workflow.status !== "active") {
+    if (
+      workflow.status !==
+      "active"
+    ) {
       return res.status(400).json({
         message:
           "Only active workflows can run",
       });
     }
 
-    // ---------------------------------
-    // Organization
-    // ---------------------------------
+    /*
+     * ---------------------------------
+     * Organization
+     * ---------------------------------
+     */
 
     const organizationResult =
       await hasura.request(
         GET_ORGANIZATION,
         {
-          orgId: workflow.org_id,
+          orgId:
+            workflow.org_id,
         }
       );
 
@@ -245,53 +314,73 @@ app.post("/", async (req, res) => {
       });
     }
 
-    // ---------------------------------
-    // Membership
-    // ---------------------------------
+    /*
+     * ---------------------------------
+     * Membership
+     * ---------------------------------
+     *
+     * Normal user execution:
+     * owner/editor required.
+     *
+     * Internal webhook execution:
+     * the webhookTrigger action has already
+     * authenticated the configured webhook
+     * trigger and this endpoint has additionally
+     * authenticated the internal server secret.
+     */
 
-    const membershipResult =
-      await hasura.request(
-        GET_MEMBERSHIP,
-        {
-          orgId: workflow.org_id,
-          userId,
-        }
-      );
+    if (!isInternalTrigger) {
+      const membershipResult =
+        await hasura.request(
+          GET_MEMBERSHIP,
+          {
+            orgId:
+              workflow.org_id,
+            userId,
+          }
+        );
 
-    const membership =
-      membershipResult.org_members[0];
+      const membership =
+        membershipResult
+          .org_members[0];
 
-    if (!membership) {
-      return res.status(403).json({
-        message:
-          "Not a member of this organization",
-      });
+      if (!membership) {
+        return res.status(403).json({
+          message:
+            "Not a member of this organization",
+        });
+      }
+
+      if (
+        !["owner", "editor"].includes(
+          membership.role
+        )
+      ) {
+        return res.status(403).json({
+          message:
+            "Insufficient role",
+        });
+      }
     }
 
-    if (
-      !["owner", "editor"].includes(
-        membership.role
-      )
-    ) {
-      return res.status(403).json({
-        message: "Insufficient role",
-      });
-    }
-
-    // ---------------------------------
-    // Atomic quota reservation
-    // ---------------------------------
+    /*
+     * ---------------------------------
+     * Atomic quota reservation
+     * ---------------------------------
+     */
 
     const quotaResult =
       await hasura.request(
         RESERVE_QUOTA,
         {
-          orgId: workflow.org_id,
+          orgId:
+            workflow.org_id,
         }
       );
 
     if (
-      quotaResult.update_organizations
+      quotaResult
+        .update_organizations
         .affected_rows !== 1
     ) {
       return res.status(403).json({
@@ -300,9 +389,11 @@ app.post("/", async (req, res) => {
       });
     }
 
-    // ---------------------------------
-    // Steps
-    // ---------------------------------
+    /*
+     * ---------------------------------
+     * Steps
+     * ---------------------------------
+     */
 
     const stepsResult =
       await hasura.request(
@@ -322,30 +413,41 @@ app.post("/", async (req, res) => {
       });
     }
 
-    // ---------------------------------
-    // Create run
-    // ---------------------------------
+    /*
+     * ---------------------------------
+     * Create run
+     * ---------------------------------
+     */
+
+    const triggerType =
+      isInternalTrigger
+        ? "webhook"
+        : "manual";
 
     const runResult =
       await hasura.request(
         CREATE_RUN,
         {
           workflowId,
-          triggerType: "manual",
-          createdBy: userId,
+          triggerType,
+          createdBy:
+            userId || null,
           startedAt:
             new Date().toISOString(),
         }
       );
 
     const run =
-      runResult.insert_workflow_runs_one;
+      runResult
+        .insert_workflow_runs_one;
 
     workflowRunId = run.id;
 
-    // ---------------------------------
-    // Execute
-    // ---------------------------------
+    /*
+     * ---------------------------------
+     * Execute
+     * ---------------------------------
+     */
 
     const execution =
       await executeWorkflowRun(
@@ -355,8 +457,12 @@ app.post("/", async (req, res) => {
       );
 
     return res.json({
-      workflow_run_id: run.id,
-      status: execution.status,
+      workflow_run_id:
+        run.id,
+
+      status:
+        execution.status,
+
       ...(execution.waitingForApproval
         ? {
             waiting_for_approval:
@@ -370,6 +476,12 @@ app.post("/", async (req, res) => {
       error
     );
 
+    /*
+     * If a run was already created,
+     * make sure a failed execution is
+     * persisted.
+     */
+
     if (workflowRunId) {
       try {
         await hasura.request(
@@ -381,7 +493,9 @@ app.post("/", async (req, res) => {
               "Workflow execution failed",
           }
         );
-      } catch (failureError) {
+      } catch (
+        failureError
+      ) {
         console.error(
           "Failed to mark run failed:",
           failureError

@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import { nhost } from "@/lib/nhost";
 import WorkflowRunMonitor from "@/components/WorkflowRunMonitor";
+import TriggerManager from "@/components/TriggerManager";
 
 type Step = {
   id: string;
@@ -456,7 +457,7 @@ export default function WorkflowPage() {
     <main className="min-h-screen bg-gray-950 p-8 text-white">
       <div className="mx-auto max-w-5xl">
 
-        {/* Header */}
+        {/* HEADER */}
 
         <div className="flex items-start justify-between">
           <div>
@@ -475,7 +476,6 @@ export default function WorkflowPage() {
           </div>
 
           <div className="flex gap-3">
-
             <button
               onClick={saveWorkflow}
               className="rounded bg-blue-600 px-4 py-2 hover:bg-blue-500"
@@ -508,11 +508,10 @@ export default function WorkflowPage() {
                 ? "Running..."
                 : "Run"}
             </button>
-
           </div>
         </div>
 
-        {/* Workflow details */}
+        {/* WORKFLOW DETAILS */}
 
         <section className="mt-8 rounded-lg border border-gray-800 bg-gray-900 p-5">
           <h2 className="text-xl font-semibold">
@@ -543,7 +542,7 @@ export default function WorkflowPage() {
           />
         </section>
 
-        {/* Steps */}
+        {/* STEPS */}
 
         <section className="mt-8">
           <div className="flex items-center justify-between">
@@ -567,17 +566,13 @@ export default function WorkflowPage() {
                   className="rounded-lg border border-gray-800 bg-gray-900 p-5"
                 >
                   <div className="flex gap-4">
-
                     <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-blue-600 font-bold">
                       {index + 1}
                     </div>
 
                     <div className="flex-1">
-
                       <input
-                        value={
-                          step.name
-                        }
+                        value={step.name}
                         onChange={(event) =>
                           updateStep(
                             index,
@@ -589,12 +584,11 @@ export default function WorkflowPage() {
                           )
                         }
                         className="w-full rounded border border-gray-700 bg-gray-950 px-3 py-2"
+                        placeholder="Step name"
                       />
 
                       <select
-                        value={
-                          step.type
-                        }
+                        value={step.type}
                         onChange={(event) =>
                           updateStep(
                             index,
@@ -619,7 +613,7 @@ export default function WorkflowPage() {
                         )}
                       </select>
 
-                      {/* LLM */}
+                      {/* LLM CONFIG */}
 
                       {step.type ===
                         "llm_call" && (
@@ -653,12 +647,11 @@ export default function WorkflowPage() {
                         />
                       )}
 
-                      {/* HTTP */}
+                      {/* HTTP CONFIG */}
 
                       {step.type ===
                         "http_request" && (
                         <div className="mt-3 grid gap-3">
-
                           <select
                             value={
                               step.config
@@ -713,16 +706,14 @@ export default function WorkflowPage() {
                             placeholder="https://example.com"
                             className="rounded border border-gray-700 bg-gray-950 px-3 py-2"
                           />
-
                         </div>
                       )}
 
-                      {/* Conditional */}
+                      {/* CONDITIONAL CONFIG */}
 
                       {step.type ===
                         "conditional_branch" && (
                         <div className="mt-3 grid gap-3">
-
                           <select
                             value={
                               step.config
@@ -787,10 +778,71 @@ export default function WorkflowPage() {
                             className="rounded border border-gray-700 bg-gray-950 px-3 py-2"
                           />
 
+                          <input
+                            type="number"
+                            value={
+                              step.config
+                                ?.true_next ??
+                              ""
+                            }
+                            onChange={(event) =>
+                              updateStep(
+                                index,
+                                {
+                                  config: {
+                                    ...step.config,
+                                    true_next:
+                                      event
+                                        .target
+                                        .value
+                                        ? Number(
+                                            event
+                                              .target
+                                              .value
+                                          )
+                                        : null,
+                                  },
+                                }
+                              )
+                            }
+                            placeholder="True next step order"
+                            className="rounded border border-gray-700 bg-gray-950 px-3 py-2"
+                          />
+
+                          <input
+                            type="number"
+                            value={
+                              step.config
+                                ?.false_next ??
+                              ""
+                            }
+                            onChange={(event) =>
+                              updateStep(
+                                index,
+                                {
+                                  config: {
+                                    ...step.config,
+                                    false_next:
+                                      event
+                                        .target
+                                        .value
+                                        ? Number(
+                                            event
+                                              .target
+                                              .value
+                                          )
+                                        : null,
+                                  },
+                                }
+                              )
+                            }
+                            placeholder="False next step order"
+                            className="rounded border border-gray-700 bg-gray-950 px-3 py-2"
+                          />
                         </div>
                       )}
 
-                      {/* Approval */}
+                      {/* APPROVAL CONFIG */}
 
                       {step.type ===
                         "approval_gate" && (
@@ -819,10 +871,9 @@ export default function WorkflowPage() {
                         />
                       )}
 
-                      {/* Step controls */}
+                      {/* STEP CONTROLS */}
 
                       <div className="mt-4 flex gap-2">
-
                         <button
                           onClick={() =>
                             moveStep(
@@ -857,7 +908,6 @@ export default function WorkflowPage() {
                         >
                           Delete
                         </button>
-
                       </div>
                     </div>
                   </div>
@@ -874,7 +924,7 @@ export default function WorkflowPage() {
           </div>
         </section>
 
-        {/* LIVE RUN MONITOR */}
+        {/* RUN MONITOR */}
 
         <WorkflowRunMonitor
           workflowRunId={
@@ -882,42 +932,15 @@ export default function WorkflowPage() {
           }
         />
 
-        {/* Triggers */}
+        {/* TRIGGER MANAGER */}
 
-        <section className="mt-8 rounded-lg border border-gray-800 bg-gray-900 p-5">
-          <h2 className="text-xl font-semibold">
-            Triggers
-          </h2>
+        <TriggerManager
+          workflowId={workflowId}
+          triggers={triggers}
+          onChanged={loadWorkflow}
+        />
 
-          <div className="mt-4 space-y-2">
-            {triggers.map(
-              (trigger) => (
-                <div
-                  key={trigger.id}
-                  className="rounded bg-gray-950 p-3"
-                >
-                  <span className="font-medium">
-                    {trigger.type}
-                  </span>
-
-                  <span className="ml-3 text-sm text-gray-500">
-                    {trigger.enabled
-                      ? "enabled"
-                      : "disabled"}
-                  </span>
-                </div>
-              )
-            )}
-
-            {!triggers.length && (
-              <p className="text-gray-500">
-                No triggers configured.
-              </p>
-            )}
-          </div>
-        </section>
-
-        {/* Message */}
+        {/* MESSAGE */}
 
         {message && (
           <pre className="mt-8 whitespace-pre-wrap rounded bg-black p-4 text-sm text-gray-300">
