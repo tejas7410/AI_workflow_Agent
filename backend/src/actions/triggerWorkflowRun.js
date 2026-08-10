@@ -4,6 +4,7 @@ const express = require("express");
 const { GraphQLClient, gql } = require("graphql-request");
 
 const app = express();
+
 app.use(express.json());
 
 const HASURA_GRAPHQL_URL = process.env.HASURA_GRAPHQL_URL;
@@ -217,14 +218,6 @@ const FAIL_WORKFLOW_RUN = gql`
   }
 `;
 
-function getPreviousOutput(previousStepRun) {
-  if (!previousStepRun) {
-    return null;
-  }
-
-  return previousStepRun.output || null;
-}
-
 async function executeHttpRequest(config) {
   const method = config.method || "GET";
   const url = config.url;
@@ -278,18 +271,8 @@ async function executeHttpRequest(config) {
   };
 }
 
-function evaluateConditional(
-  config,
-  previousOutput
-) {
-  const source =
-    config.source || "previous.output.text";
-
-  let value = previousOutput;
-
-  if (source === "previous.output.text") {
-    value = previousOutput?.text;
-  }
+function evaluateConditional(config, llmOutput) {
+  const value = llmOutput?.text;
 
   if (config.condition === "contains") {
     return String(value || "").includes(
@@ -319,20 +302,21 @@ app.post("/", async (req, res) => {
     const workflowId =
       req.body.input?.workflow_id;
 
-    // Authentication
+    // 1. Authentication
     if (!userId) {
       return res.status(401).json({
         message: "Unauthenticated",
       });
     }
 
+    // 2. Validate input
     if (!workflowId) {
       return res.status(400).json({
         message: "workflow_id is required",
       });
     }
 
-    // Resolve workflow
+    // 3. Resolve workflow
     const workflowResult =
       await hasura.request(GET_WORKFLOW, {
         workflowId,
@@ -347,7 +331,7 @@ app.post("/", async (req, res) => {
       });
     }
 
-    // Resolve organization
+    // 4. Resolve organization
     const organizationResult =
       await hasura.request(GET_ORGANIZATION, {
         orgId: workflow.org_id,
@@ -362,7 +346,7 @@ app.post("/", async (req, res) => {
       });
     }
 
-    // Organization membership
+    // 5. Organization membership
     const membershipResult =
       await hasura.request(GET_MEMBERSHIP, {
         orgId: workflow.org_id,
@@ -379,7 +363,7 @@ app.post("/", async (req, res) => {
       });
     }
 
-    // Role
+    // 6. Role
     if (
       !["owner", "editor"].includes(
         membership.role
@@ -390,7 +374,7 @@ app.post("/", async (req, res) => {
       });
     }
 
-    // Quota
+    // 7. Quota
     if (
       organization.calls_used >=
       organization.calls_allowed
@@ -401,7 +385,7 @@ app.post("/", async (req, res) => {
       });
     }
 
-    // Load steps
+    // 8. Load workflow steps
     const stepsResult =
       await hasura.request(GET_WORKFLOW_STEPS, {
         workflowId,
@@ -416,7 +400,7 @@ app.post("/", async (req, res) => {
       });
     }
 
-    // Create workflow run
+    // 9. Create workflow run
     const runResult =
       await hasura.request(CREATE_RUN, {
         workflowId,
@@ -431,9 +415,11 @@ app.post("/", async (req, res) => {
 
     workflowRunId = run.id;
 
-    let previousOutput = null;
+    // Keep the LLM output available for the
+    // conditional branch.
+    let lastLlmOutput = null;
 
-    // Execute steps in order
+    // 10. Execute steps in order
     for (const step of steps) {
       const stepStartedAt =
         new Date().toISOString();
@@ -454,7 +440,9 @@ app.post("/", async (req, res) => {
 
       let output;
 
-      // LLM
+      // ---------------------------------
+      // LLM CALL
+      // ---------------------------------
       if (
         step.type === "llm_call" &&
         step.config?.provider === "test"
@@ -467,9 +455,15 @@ app.post("/", async (req, res) => {
             step.config.prompt || "",
           text: "Hello from the test LLM",
         };
+
+        // IMPORTANT:
+        // Do NOT use "let" here.
+        lastLlmOutput = output;
       }
 
-      // HTTP
+      // ---------------------------------
+      // HTTP REQUEST
+      // ---------------------------------
       else if (
         step.type === "http_request"
       ) {
@@ -479,14 +473,16 @@ app.post("/", async (req, res) => {
           );
       }
 
-      // Conditional
+      // ---------------------------------
+      // CONDITIONAL BRANCH
+      // ---------------------------------
       else if (
         step.type === "conditional_branch"
       ) {
         const result =
           evaluateConditional(
             step.config || {},
-            previousOutput
+            lastLlmOutput
           );
 
         output = {
@@ -496,9 +492,44 @@ app.post("/", async (req, res) => {
           value:
             step.config?.value || null,
         };
+
+        // If false and there is no false_next,
+        // complete the workflow here.
+        if (!result) {
+          await hasura.request(
+            COMPLETE_STEP_RUN,
+            {
+              id: stepRun.id,
+              output,
+              completedAt:
+                new Date().toISOString(),
+            }
+          );
+
+          const completedRun =
+            await hasura.request(
+              COMPLETE_WORKFLOW_RUN,
+              {
+                id: run.id,
+                completedAt:
+                  new Date().toISOString(),
+              }
+            );
+
+          return res.json({
+            workflow_run_id:
+              completedRun
+                .update_workflow_runs_by_pk.id,
+            status:
+              completedRun
+                .update_workflow_runs_by_pk.status,
+          });
+        }
       }
 
-      // Approval gate
+      // ---------------------------------
+      // APPROVAL GATE
+      // ---------------------------------
       else if (
         step.type === "approval_gate"
       ) {
@@ -532,13 +563,16 @@ app.post("/", async (req, res) => {
         });
       }
 
+      // ---------------------------------
+      // UNSUPPORTED STEP
+      // ---------------------------------
       else {
         throw new Error(
           `Step type not implemented: ${step.type}`
         );
       }
 
-      // Save normal step output
+      // Save normal step output.
       await hasura.request(
         COMPLETE_STEP_RUN,
         {
@@ -548,11 +582,9 @@ app.post("/", async (req, res) => {
             new Date().toISOString(),
         }
       );
-
-      previousOutput = output;
     }
 
-    // Everything completed
+    // 11. All steps completed
     const completedRun =
       await hasura.request(
         COMPLETE_WORKFLOW_RUN,
