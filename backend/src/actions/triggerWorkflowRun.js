@@ -136,25 +136,17 @@ const RESERVE_QUOTA = gql`
   mutation ReserveQuota(
     $orgId: uuid!
   ) {
-    update_organizations(
-      where: {
-        id: {
-          _eq: $orgId
-        }
-        calls_used: {
-          _lt: calls_allowed
-        }
+    update_organizations_by_pk(
+      pk_columns: {
+        id: $orgId
       }
       _inc: {
         calls_used: 1
       }
     ) {
-      affected_rows
-      returning {
-        id
-        calls_used
-        calls_allowed
-      }
+      id
+      calls_used
+      calls_allowed
     }
   }
 `;
@@ -307,7 +299,7 @@ app.post("/", async (req, res) => {
       organizationResult
         .organizations_by_pk;
 
-    if (!organization) {
+    if (!quotaOrganization) {
       return res.status(404).json({
         message:
           "Organization not found",
@@ -369,25 +361,42 @@ app.post("/", async (req, res) => {
      * ---------------------------------
      */
 
-    const quotaResult =
-      await hasura.request(
-        RESERVE_QUOTA,
-        {
-          orgId:
-            workflow.org_id,
-        }
-      );
-
-    if (
-      quotaResult
-        .update_organizations
-        .affected_rows !== 1
-    ) {
-      return res.status(403).json({
-        message:
-          "Organization quota exhausted",
-      });
+    const quotaCheck =
+  await hasura.request(
+    GET_QUOTA,
+    {
+      orgId:
+        workflow.org_id,
     }
+  );
+
+const quotaOrganization =
+  quotaCheck.organizations_by_pk;
+
+if (!quotaOrganization) {
+  return res.status(403).json({
+    message:
+      "Organization not found",
+  });
+}
+
+if (
+  quotaOrganization.calls_used >=
+  quotaOrganization.calls_allowed
+) {
+  return res.status(403).json({
+    message:
+      "Organization quota exhausted",
+  });
+}
+
+await hasura.request(
+  RESERVE_QUOTA,
+  {
+    orgId:
+      workflow.org_id,
+  }
+);
 
     /*
      * ---------------------------------

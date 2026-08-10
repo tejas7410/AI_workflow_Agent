@@ -14,7 +14,8 @@ export default function WorkflowCreateTest() {
 
   async function showCurrentUser() {
     try {
-      const session = nhost.getUserSession();
+      const session =
+  nhost.getUserSession();
 
       if (!session) {
         setResult("Not logged in");

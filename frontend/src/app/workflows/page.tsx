@@ -11,12 +11,33 @@ type Organization = {
   calls_allowed: number;
 };
 
+type OrganizationMember = {
+  role: string;
+  organization: Organization;
+};
+
+type OrganizationsResponse = {
+  org_members: OrganizationMember[];
+};
+
 type Workflow = {
   id: string;
   name: string;
   description: string | null;
   status: string;
   org_id: string;
+};
+
+type WorkflowsResponse = {
+  workflows: Workflow[];
+};
+
+type CreateWorkflowResponse = {
+  insert_workflows_one: {
+    id: string;
+    name: string;
+    status: string;
+  };
 };
 
 export default function WorkflowsPage() {
@@ -50,6 +71,8 @@ export default function WorkflowsPage() {
 
   async function loadOrganizations() {
     try {
+      setLoading(true);
+
       const session =
         nhost.getUserSession();
 
@@ -60,7 +83,9 @@ export default function WorkflowsPage() {
       }
 
       const response =
-        await nhost.graphql.request({
+        await nhost.graphql.request<
+          OrganizationsResponse
+        >({
           query: `
             query GetOrganizations(
               $userId: uuid!
@@ -88,16 +113,17 @@ export default function WorkflowsPage() {
         });
 
       const members =
-        response.data?.org_members || [];
+        response.body?.data?.org_members ?? [];
 
-      const orgs = members.map(
-        (member: any) =>
-          member.organization
-      );
+      const orgs =
+        members.map(
+          (member) =>
+            member.organization
+        );
 
       setOrganizations(orgs);
 
-      if (orgs.length) {
+      if (orgs.length > 0) {
         setOrganizationId(
           orgs[0].id
         );
@@ -118,7 +144,9 @@ export default function WorkflowsPage() {
   ) {
     try {
       const response =
-        await nhost.graphql.request({
+        await nhost.graphql.request<
+          WorkflowsResponse
+        >({
           query: `
             query GetWorkflows(
               $orgId: uuid!
@@ -147,7 +175,7 @@ export default function WorkflowsPage() {
         });
 
       setWorkflows(
-        response.data?.workflows || []
+        response.body?.data?.workflows ?? []
       );
     } catch (error) {
       setMessage(
@@ -159,7 +187,20 @@ export default function WorkflowsPage() {
   }
 
   async function createWorkflow() {
-    if (!newName.trim()) {
+    const trimmedName =
+      newName.trim();
+
+    if (!trimmedName) {
+      setMessage(
+        "Enter a workflow name."
+      );
+      return;
+    }
+
+    if (!organizationId) {
+      setMessage(
+        "Select an organization first."
+      );
       return;
     }
 
@@ -177,36 +218,49 @@ export default function WorkflowsPage() {
         );
       }
 
-      await nhost.graphql.request({
-        query: `
-          mutation CreateWorkflow(
-            $orgId: uuid!
-            $name: String!
-            $createdBy: uuid!
-          ) {
-            insert_workflows_one(
-              object: {
-                org_id: $orgId
-                name: $name
-                created_by: $createdBy
-                status: "draft"
-              }
+      const response =
+        await nhost.graphql.request<
+          CreateWorkflowResponse
+        >({
+          query: `
+            mutation CreateWorkflow(
+              $orgId: uuid!
+              $name: String!
+              $createdBy: uuid!
             ) {
-              id
-              name
-              status
+              insert_workflows_one(
+                object: {
+                  org_id: $orgId
+                  name: $name
+                  created_by: $createdBy
+                  status: "draft"
+                }
+              ) {
+                id
+                name
+                status
+              }
             }
-          }
-        `,
-        variables: {
-          orgId: organizationId,
-          name: newName.trim(),
-          createdBy:
-            session.user.id,
-        },
-      });
+          `,
+          variables: {
+            orgId: organizationId,
+            name: trimmedName,
+            createdBy:
+              session.user.id,
+          },
+        });
+
+      if (
+        !response.body?.data
+          ?.insert_workflows_one
+      ) {
+        throw new Error(
+          "Workflow was not created."
+        );
+      }
 
       setNewName("");
+
       setMessage(
         "Workflow created."
       );
@@ -225,15 +279,15 @@ export default function WorkflowsPage() {
 
   if (loading) {
     return (
-      <main className="min-h-screen bg-gray-950 p-8 text-white">
+      <main className="min-h-screen bg-slate-950 p-8 text-white">
         Loading...
       </main>
     );
   }
 
   return (
-    <main className="min-h-screen bg-gray-950 p-8 text-white">
-      <div className="mx-auto max-w-5xl">
+    <main className="min-h-screen bg-slate-950 text-white">
+      <div className="mx-auto max-w-6xl p-8">
         <h1 className="text-3xl font-bold">
           Workflows
         </h1>
@@ -271,6 +325,13 @@ export default function WorkflowsPage() {
           </div>
         )}
 
+        {organizations.length === 0 && (
+          <div className="mt-6 rounded-lg border border-yellow-900 bg-yellow-950/30 p-4 text-yellow-300">
+            You are not a member of any
+            organization.
+          </div>
+        )}
+
         {organizationId && (
           <div className="mt-6 rounded-lg border border-gray-800 bg-gray-900 p-4">
             <div className="flex gap-3">
@@ -281,12 +342,21 @@ export default function WorkflowsPage() {
                     event.target.value
                   )
                 }
+                onKeyDown={(event) => {
+                  if (
+                    event.key === "Enter"
+                  ) {
+                    createWorkflow();
+                  }
+                }}
                 placeholder="Workflow name"
-                className="flex-1 rounded border border-gray-700 bg-gray-950 px-4 py-2"
+                className="flex-1 rounded border border-gray-700 bg-gray-950 px-4 py-2 outline-none focus:border-blue-500"
               />
 
               <button
-                onClick={createWorkflow}
+                onClick={
+                  createWorkflow
+                }
                 className="rounded bg-blue-600 px-5 py-2 font-medium hover:bg-blue-500"
               >
                 Create
@@ -321,7 +391,9 @@ export default function WorkflowsPage() {
 
                 {workflow.description && (
                   <p className="mt-2 text-sm text-gray-400">
-                    {workflow.description}
+                    {
+                      workflow.description
+                    }
                   </p>
                 )}
               </Link>

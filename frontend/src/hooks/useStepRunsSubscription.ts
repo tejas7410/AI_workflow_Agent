@@ -19,18 +19,9 @@ export type StepRun = {
   completed_at: string | null;
 };
 
-type SubscriptionResponse = {
+type SubscriptionData = {
   step_runs: StepRun[];
 };
-
-function getWebSocketUrl() {
-  const graphqlUrl =
-    nhost.graphql.url;
-
-  return graphqlUrl
-    .replace(/^https:\/\//, "wss://")
-    .replace(/^http:\/\//, "ws://");
-}
 
 export function useStepRunsSubscription(
   workflowRunId: string | null
@@ -48,34 +39,49 @@ export function useStepRunsSubscription(
       return;
     }
 
-    let disposed = false;
+    let stopped = false;
 
-    const client = createClient({
-      url: getWebSocketUrl(),
+    const graphqlUrl =
+      nhost.graphql.url;
 
-      connectionParams: async () => {
-        const session =
-          nhost.getUserSession();
+    const wsUrl =
+      graphqlUrl
+        .replace(
+          /^https:\/\//,
+          "wss://"
+        )
+        .replace(
+          /^http:\/\//,
+          "ws://"
+        );
 
-        if (!session?.accessToken) {
-          throw new Error(
-            "No authenticated Nhost session"
-          );
-        }
+    const client =
+      createClient({
+        url: wsUrl,
 
-        return {
-          Authorization:
-            `Bearer ${session.accessToken}`,
-        };
-      },
+        connectionParams: async () => {
+          const session =
+            nhost.getUserSession();
 
-      retryAttempts: 5,
+          if (
+            !session?.accessToken
+          ) {
+            throw new Error(
+              "No active Nhost session"
+            );
+          }
 
-      shouldRetry: () => true,
-    });
+          return {
+            Authorization:
+              `Bearer ${session.accessToken}`,
+          };
+        },
+
+        retryAttempts: 5,
+      });
 
     const unsubscribe =
-      client.subscribe<SubscriptionResponse>(
+      client.subscribe<SubscriptionData>(
         {
           query: `
             subscription StepRuns(
@@ -114,11 +120,13 @@ export function useStepRunsSubscription(
 
         {
           next: (result) => {
-            if (disposed) {
+            if (stopped) {
               return;
             }
 
-            if (result.data?.step_runs) {
+            if (
+              result.data?.step_runs
+            ) {
               setStepRuns(
                 result.data.step_runs
               );
@@ -128,34 +136,26 @@ export function useStepRunsSubscription(
           },
 
           error: (subscriptionError) => {
-            if (disposed) {
+            if (stopped) {
               return;
             }
 
             console.error(
-              "Step runs subscription error:",
+              "Step subscription error:",
               subscriptionError
             );
 
             setError(
-              "Live step updates disconnected."
+              "Live updates disconnected."
             );
           },
 
-          complete: () => {
-            if (disposed) {
-              return;
-            }
-
-            console.log(
-              "Step runs subscription completed"
-            );
-          },
+          complete: () => {},
         }
       );
 
     return () => {
-      disposed = true;
+      stopped = true;
       unsubscribe();
       client.dispose();
     };

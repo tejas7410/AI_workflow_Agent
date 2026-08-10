@@ -1,245 +1,291 @@
-require("dotenv").config();
+"use client";
 
-const express = require("express");
-const crypto = require("crypto");
-const { GraphQLClient, gql } = require("graphql-request");
+import { useState } from "react";
+import { nhost } from "@/lib/nhost";
 
-const app = express();
+type Trigger = {
+  id: string;
+  type: string;
+  enabled: boolean;
+  config: Record<string, unknown>;
+};
 
-app.use(express.json());
+type Props = {
+  workflowId: string;
+  triggers: Trigger[];
+  onChanged: () => Promise<void>;
+};
 
-const HASURA_GRAPHQL_URL =
-  process.env.HASURA_GRAPHQL_URL;
+export default function TriggerManager({
+  workflowId,
+  triggers,
+  onChanged,
+}: Props) {
+  const [creating, setCreating] =
+    useState(false);
 
-const HASURA_ADMIN_SECRET =
-  process.env.HASURA_ADMIN_SECRET;
+  const [message, setMessage] =
+    useState("");
 
-const TRIGGER_WORKFLOW_URL =
-  process.env.TRIGGER_WORKFLOW_URL;
+  const [webhookSecret, setWebhookSecret] =
+    useState("");
 
-const INTERNAL_TRIGGER_SECRET =
-  process.env.INTERNAL_TRIGGER_SECRET;
-
-if (
-  !HASURA_GRAPHQL_URL ||
-  !HASURA_ADMIN_SECRET ||
-  !TRIGGER_WORKFLOW_URL ||
-  !INTERNAL_TRIGGER_SECRET
-) {
-  console.error(
-    "Missing webhook environment variables"
-  );
-  process.exit(1);
-}
-
-const hasura = new GraphQLClient(
-  HASURA_GRAPHQL_URL,
-  {
-    headers: {
-      "x-hasura-admin-secret":
-        HASURA_ADMIN_SECRET,
-    },
-  }
-);
-
-const GET_TRIGGER = gql`
-  query GetWebhookTrigger(
-    $workflowId: uuid!
-  ) {
-    workflow_triggers(
-      where: {
-        workflow_id: {
-          _eq: $workflowId
-        }
-        type: {
-          _eq: "webhook"
-        }
-        enabled: {
-          _eq: true
-        }
-      }
-      limit: 1
-    ) {
-      id
-      workflow_id
-      type
-      enabled
-      config
-    }
-  }
-`;
-
-function safeEqual(a, b) {
-  if (
-    typeof a !== "string" ||
-    typeof b !== "string"
-  ) {
-    return false;
-  }
-
-  const aBuffer =
-    Buffer.from(a);
-
-  const bBuffer =
-    Buffer.from(b);
-
-  if (
-    aBuffer.length !==
-    bBuffer.length
-  ) {
-    return false;
-  }
-
-  return crypto.timingSafeEqual(
-    aBuffer,
-    bBuffer
-  );
-}
-
-app.post("/", async (req, res) => {
-  try {
-    console.log(
-      "WEBHOOK TRIGGER BODY:",
-      JSON.stringify(req.body)
-    );
-
-    const workflowId =
-      req.query.workflow_id ||
-      req.body?.workflow_id;
-
-    if (!workflowId) {
-      return res.status(400).json({
-        message:
-          "workflow_id is required",
-      });
-    }
-
-    const providedSecret =
-      req.headers[
-        "x-webhook-secret"
-      ] ||
-      req.body?.secret;
-
-    if (!providedSecret) {
-      return res.status(401).json({
-        message:
-          "Webhook secret is required",
-      });
-    }
-
-    const result =
-      await hasura.request(
-        GET_TRIGGER,
-        {
-          workflowId,
-        }
+  async function createWebhookTrigger() {
+    if (!webhookSecret.trim()) {
+      setMessage(
+        "Enter a webhook secret."
       );
-
-    const trigger =
-      result.workflow_triggers?.[0];
-
-    if (!trigger) {
-      return res.status(404).json({
-        message:
-          "Enabled webhook trigger not found",
-      });
+      return;
     }
 
-    const configuredSecret =
-      trigger.config?.secret;
-
-    if (!configuredSecret) {
-      return res.status(500).json({
-        message:
-          "Webhook trigger has no configured secret",
-      });
-    }
-
-    if (
-      !safeEqual(
-        String(providedSecret),
-        String(configuredSecret)
-      )
-    ) {
-      return res.status(401).json({
-        message:
-          "Invalid webhook secret",
-      });
-    }
-
-    /*
-     * The webhook action is now authenticated.
-     *
-     * We call triggerWorkflowRun through its
-     * internal endpoint rather than trusting the
-     * public frontend.
-     */
-
-    const response =
-      await fetch(
-        TRIGGER_WORKFLOW_URL,
-        {
-          method: "POST",
-
-          headers: {
-            "Content-Type":
-              "application/json",
-
-            "x-internal-trigger-secret":
-              INTERNAL_TRIGGER_SECRET,
-          },
-
-          body: JSON.stringify({
-            workflow_id: workflowId,
-            trigger_type: "webhook",
-            payload:
-              req.body?.payload ??
-              req.body ??
-              {},
-          }),
-        }
-      );
-
-    const text =
-      await response.text();
-
-    let data;
+    setCreating(true);
+    setMessage("");
 
     try {
-      data = JSON.parse(text);
-    } catch {
-      data = {
-        message: text,
-      };
-    }
+      await nhost.graphql.request({
+        query: `
+          mutation CreateWebhookTrigger(
+            $workflowId: uuid!
+            $config: jsonb!
+          ) {
+            insert_workflow_triggers_one(
+              object: {
+                workflow_id: $workflowId
+                type: "webhook"
+                enabled: true
+                config: $config
+              }
+            ) {
+              id
+              type
+              enabled
+              config
+            }
+          }
+        `,
+        variables: {
+          workflowId,
+          config: {
+            secret:
+              webhookSecret.trim(),
+          },
+        },
+      });
 
-    if (!response.ok) {
-      console.error(
-        "triggerWorkflowRun returned:",
-        response.status,
-        data
+      setWebhookSecret("");
+
+      setMessage(
+        "Webhook trigger created."
       );
 
-      return res.status(
-        response.status
-      ).json(data);
+      await onChanged();
+    } catch (error) {
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : "Failed to create webhook trigger"
+      );
+    } finally {
+      setCreating(false);
     }
-
-    return res.status(200).json(
-      data
-    );
-  } catch (error) {
-    console.error(
-      "webhookTrigger error:",
-      error
-    );
-
-    return res.status(500).json({
-      message:
-        error.message ||
-        "Webhook trigger failed",
-    });
   }
-});
 
-module.exports = app;
+  async function toggleTrigger(
+    trigger: Trigger
+  ) {
+    try {
+      await nhost.graphql.request({
+        query: `
+          mutation ToggleTrigger(
+            $id: uuid!
+            $enabled: Boolean!
+          ) {
+            update_workflow_triggers_by_pk(
+              pk_columns: {
+                id: $id
+              }
+              _set: {
+                enabled: $enabled
+              }
+            ) {
+              id
+              enabled
+            }
+          }
+        `,
+        variables: {
+          id: trigger.id,
+          enabled: !trigger.enabled,
+        },
+      });
+
+      await onChanged();
+    } catch (error) {
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : "Failed to update trigger"
+      );
+    }
+  }
+
+  async function deleteTrigger(
+    triggerId: string
+  ) {
+    try {
+      await nhost.graphql.request({
+        query: `
+          mutation DeleteTrigger(
+            $id: uuid!
+          ) {
+            delete_workflow_triggers_by_pk(
+              id: $id
+            ) {
+              id
+            }
+          }
+        `,
+        variables: {
+          id: triggerId,
+        },
+      });
+
+      setMessage(
+        "Trigger deleted."
+      );
+
+      await onChanged();
+    } catch (error) {
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : "Failed to delete trigger"
+      );
+    }
+  }
+
+  return (
+    <section className="mt-8 rounded-lg border border-gray-800 bg-gray-900 p-5">
+      <h2 className="text-xl font-semibold">
+        Triggers
+      </h2>
+
+      <p className="mt-1 text-sm text-gray-500">
+        Manual execution is available
+        through the Run button. Add a
+        webhook for non-manual execution.
+      </p>
+
+      <div className="mt-5 space-y-3">
+        {triggers.map(
+          (trigger) => (
+            <div
+              key={trigger.id}
+              className="rounded-lg border border-gray-800 bg-gray-950 p-4"
+            >
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="font-medium">
+                    {trigger.type}
+                  </p>
+
+                  <p className="mt-1 text-xs text-gray-500">
+                    {trigger.enabled
+                      ? "Enabled"
+                      : "Disabled"}
+                  </p>
+                </div>
+
+                <div className="flex gap-2">
+                  <button
+                    onClick={() =>
+                      toggleTrigger(
+                        trigger
+                      )
+                    }
+                    className="rounded bg-gray-800 px-3 py-1 text-sm hover:bg-gray-700"
+                  >
+                    {trigger.enabled
+                      ? "Disable"
+                      : "Enable"}
+                  </button>
+
+                  <button
+                    onClick={() =>
+                      deleteTrigger(
+                        trigger.id
+                      )
+                    }
+                    className="rounded bg-red-900 px-3 py-1 text-sm hover:bg-red-800"
+                  >
+                    Delete
+                  </button>
+                </div>
+              </div>
+
+              {trigger.type ===
+                "webhook" && (
+                <div className="mt-3 rounded bg-gray-900 p-3">
+                  <p className="text-xs text-gray-500">
+                    Webhook endpoint
+                  </p>
+
+                  <p className="mt-1 break-all text-sm text-gray-300"> /api/webhookTrigger?workflow_id= {String( trigger.config?.workflow_id ?? "WORKFLOW_ID" )} </p>
+                </div>
+              )}
+            </div>
+          )
+        )}
+
+        {!triggers.length && (
+          <div className="rounded-lg border border-dashed border-gray-800 p-6 text-center text-gray-500">
+            No triggers configured.
+          </div>
+        )}
+      </div>
+
+      <div className="mt-6 border-t border-gray-800 pt-6">
+        <h3 className="font-medium">
+          Add Webhook Trigger
+        </h3>
+
+        <p className="mt-1 text-sm text-gray-500">
+          Enter the secret that will be
+          required by the webhook endpoint.
+        </p>
+
+        <div className="mt-4 flex gap-3">
+          <input
+            type="password"
+            value={webhookSecret}
+            onChange={(event) =>
+              setWebhookSecret(
+                event.target.value
+              )
+            }
+            placeholder="Webhook secret"
+            className="flex-1 rounded border border-gray-700 bg-gray-950 px-4 py-2 text-white"
+          />
+
+          <button
+            onClick={
+              createWebhookTrigger
+            }
+            disabled={creating}
+            className="rounded bg-blue-600 px-5 py-2 font-medium hover:bg-blue-500 disabled:opacity-50"
+          >
+            {creating
+              ? "Creating..."
+              : "Add Webhook"}
+          </button>
+        </div>
+      </div>
+
+      {message && (
+        <p className="mt-4 text-sm text-gray-400">
+          {message}
+        </p>
+      )}
+    </section>
+  );
+}
