@@ -4,7 +4,6 @@ const express = require("express");
 const { GraphQLClient, gql } = require("graphql-request");
 
 const app = express();
-
 app.use(express.json());
 
 const HASURA_GRAPHQL_URL = process.env.HASURA_GRAPHQL_URL;
@@ -129,9 +128,7 @@ const COMPLETE_STEP_RUN = gql`
     $completedAt: timestamptz!
   ) {
     update_step_runs_by_pk(
-      pk_columns: {
-        id: $id
-      }
+      pk_columns: { id: $id }
       _set: {
         status: "completed"
         output: $output
@@ -146,15 +143,32 @@ const COMPLETE_STEP_RUN = gql`
   }
 `;
 
+const PAUSE_STEP_RUN = gql`
+  mutation PauseStepRun(
+    $id: uuid!
+    $output: jsonb
+  ) {
+    update_step_runs_by_pk(
+      pk_columns: { id: $id }
+      _set: {
+        status: "paused"
+        output: $output
+      }
+    ) {
+      id
+      status
+      output
+    }
+  }
+`;
+
 const COMPLETE_WORKFLOW_RUN = gql`
   mutation CompleteWorkflowRun(
     $id: uuid!
     $completedAt: timestamptz!
   ) {
     update_workflow_runs_by_pk(
-      pk_columns: {
-        id: $id
-      }
+      pk_columns: { id: $id }
       _set: {
         status: "completed"
         completed_at: $completedAt
@@ -162,7 +176,24 @@ const COMPLETE_WORKFLOW_RUN = gql`
     ) {
       id
       status
-      completed_at
+    }
+  }
+`;
+
+const PAUSE_WORKFLOW_RUN = gql`
+  mutation PauseWorkflowRun(
+    $id: uuid!
+    $pausedAt: timestamptz!
+  ) {
+    update_workflow_runs_by_pk(
+      pk_columns: { id: $id }
+      _set: {
+        status: "paused"
+        paused_at: $pausedAt
+      }
+    ) {
+      id
+      status
     }
   }
 `;
@@ -173,9 +204,7 @@ const FAIL_WORKFLOW_RUN = gql`
     $error: String!
   ) {
     update_workflow_runs_by_pk(
-      pk_columns: {
-        id: $id
-      }
+      pk_columns: { id: $id }
       _set: {
         status: "failed"
         error: $error
@@ -187,6 +216,95 @@ const FAIL_WORKFLOW_RUN = gql`
     }
   }
 `;
+
+function getPreviousOutput(previousStepRun) {
+  if (!previousStepRun) {
+    return null;
+  }
+
+  return previousStepRun.output || null;
+}
+
+async function executeHttpRequest(config) {
+  const method = config.method || "GET";
+  const url = config.url;
+
+  if (!url) {
+    throw new Error("http_request requires config.url");
+  }
+
+  const options = {
+    method,
+    headers: config.headers || {},
+  };
+
+  if (
+    config.body !== undefined &&
+    method !== "GET" &&
+    method !== "HEAD"
+  ) {
+    options.body =
+      typeof config.body === "string"
+        ? config.body
+        : JSON.stringify(config.body);
+
+    if (!options.headers["Content-Type"]) {
+      options.headers["Content-Type"] =
+        "application/json";
+    }
+  }
+
+  const response = await fetch(url, options);
+
+  const text = await response.text();
+
+  let body;
+
+  try {
+    body = JSON.parse(text);
+  } catch {
+    body = text;
+  }
+
+  if (!response.ok) {
+    throw new Error(
+      `HTTP request failed with status ${response.status}`
+    );
+  }
+
+  return {
+    status: response.status,
+    body,
+  };
+}
+
+function evaluateConditional(
+  config,
+  previousOutput
+) {
+  const source =
+    config.source || "previous.output.text";
+
+  let value = previousOutput;
+
+  if (source === "previous.output.text") {
+    value = previousOutput?.text;
+  }
+
+  if (config.condition === "contains") {
+    return String(value || "").includes(
+      String(config.value || "")
+    );
+  }
+
+  if (config.condition === "equals") {
+    return value === config.value;
+  }
+
+  throw new Error(
+    `Unsupported conditional condition: ${config.condition}`
+  );
+}
 
 app.post("/", async (req, res) => {
   let workflowRunId = null;
@@ -201,27 +319,24 @@ app.post("/", async (req, res) => {
     const workflowId =
       req.body.input?.workflow_id;
 
-    // 1. Authentication
+    // Authentication
     if (!userId) {
       return res.status(401).json({
         message: "Unauthenticated",
       });
     }
 
-    // 2. Validate input
     if (!workflowId) {
       return res.status(400).json({
         message: "workflow_id is required",
       });
     }
 
-    // 3. Resolve workflow
-    const workflowResult = await hasura.request(
-      GET_WORKFLOW,
-      {
+    // Resolve workflow
+    const workflowResult =
+      await hasura.request(GET_WORKFLOW, {
         workflowId,
-      }
-    );
+      });
 
     const workflow =
       workflowResult.workflows_by_pk;
@@ -232,14 +347,11 @@ app.post("/", async (req, res) => {
       });
     }
 
-    // 4. Resolve organization
+    // Resolve organization
     const organizationResult =
-      await hasura.request(
-        GET_ORGANIZATION,
-        {
-          orgId: workflow.org_id,
-        }
-      );
+      await hasura.request(GET_ORGANIZATION, {
+        orgId: workflow.org_id,
+      });
 
     const organization =
       organizationResult.organizations_by_pk;
@@ -250,15 +362,12 @@ app.post("/", async (req, res) => {
       });
     }
 
-    // 5. Check organization membership
+    // Organization membership
     const membershipResult =
-      await hasura.request(
-        GET_MEMBERSHIP,
-        {
-          orgId: workflow.org_id,
-          userId,
-        }
-      );
+      await hasura.request(GET_MEMBERSHIP, {
+        orgId: workflow.org_id,
+        userId,
+      });
 
     const membership =
       membershipResult.org_members[0];
@@ -270,7 +379,7 @@ app.post("/", async (req, res) => {
       });
     }
 
-    // 6. Check role
+    // Role
     if (
       !["owner", "editor"].includes(
         membership.role
@@ -281,7 +390,7 @@ app.post("/", async (req, res) => {
       });
     }
 
-    // 7. Check quota
+    // Quota
     if (
       organization.calls_used >=
       organization.calls_allowed
@@ -292,46 +401,39 @@ app.post("/", async (req, res) => {
       });
     }
 
-    // 8. Load workflow steps
+    // Load steps
     const stepsResult =
-      await hasura.request(
-        GET_WORKFLOW_STEPS,
-        {
-          workflowId,
-        }
-      );
+      await hasura.request(GET_WORKFLOW_STEPS, {
+        workflowId,
+      });
 
     const steps =
       stepsResult.workflow_steps;
 
     if (!steps || steps.length === 0) {
       return res.status(400).json({
-        message:
-          "Workflow has no steps",
+        message: "Workflow has no steps",
       });
     }
 
-    // 9. Create workflow run
-    const startedAt =
-      new Date().toISOString();
-
+    // Create workflow run
     const runResult =
-      await hasura.request(
-        CREATE_RUN,
-        {
-          workflowId,
-          triggerType: "manual",
-          createdBy: userId,
-          startedAt,
-        }
-      );
+      await hasura.request(CREATE_RUN, {
+        workflowId,
+        triggerType: "manual",
+        createdBy: userId,
+        startedAt:
+          new Date().toISOString(),
+      });
 
     const run =
       runResult.insert_workflow_runs_one;
 
     workflowRunId = run.id;
 
-    // 10. Execute steps in order
+    let previousOutput = null;
+
+    // Execute steps in order
     for (const step of steps) {
       const stepStartedAt =
         new Date().toISOString();
@@ -350,38 +452,107 @@ app.post("/", async (req, res) => {
       const stepRun =
         stepRunResult.insert_step_runs_one;
 
-      // Temporary deterministic test adapter.
+      let output;
+
+      // LLM
       if (
         step.type === "llm_call" &&
         step.config?.provider === "test"
       ) {
-        const output = {
+        output = {
           provider: "test",
-          model: step.config.model || null,
-          prompt: step.config.prompt || "",
+          model:
+            step.config.model || null,
+          prompt:
+            step.config.prompt || "",
           text: "Hello from the test LLM",
+        };
+      }
+
+      // HTTP
+      else if (
+        step.type === "http_request"
+      ) {
+        output =
+          await executeHttpRequest(
+            step.config || {}
+          );
+      }
+
+      // Conditional
+      else if (
+        step.type === "conditional_branch"
+      ) {
+        const result =
+          evaluateConditional(
+            step.config || {},
+            previousOutput
+          );
+
+        output = {
+          condition_met: result,
+          source:
+            step.config?.source || null,
+          value:
+            step.config?.value || null,
+        };
+      }
+
+      // Approval gate
+      else if (
+        step.type === "approval_gate"
+      ) {
+        output = {
+          message:
+            step.config?.message ||
+            "Approval required",
         };
 
         await hasura.request(
-          COMPLETE_STEP_RUN,
+          PAUSE_STEP_RUN,
           {
             id: stepRun.id,
             output,
-            completedAt:
+          }
+        );
+
+        await hasura.request(
+          PAUSE_WORKFLOW_RUN,
+          {
+            id: run.id,
+            pausedAt:
               new Date().toISOString(),
           }
         );
 
-        continue;
+        return res.json({
+          workflow_run_id: run.id,
+          status: "paused",
+          waiting_for_approval: stepRun.id,
+        });
       }
 
-      // We have not implemented other step types yet.
-      throw new Error(
-        `Step type not implemented yet: ${step.type}`
+      else {
+        throw new Error(
+          `Step type not implemented: ${step.type}`
+        );
+      }
+
+      // Save normal step output
+      await hasura.request(
+        COMPLETE_STEP_RUN,
+        {
+          id: stepRun.id,
+          output,
+          completedAt:
+            new Date().toISOString(),
+        }
       );
+
+      previousOutput = output;
     }
 
-    // 11. All steps completed
+    // Everything completed
     const completedRun =
       await hasura.request(
         COMPLETE_WORKFLOW_RUN,
@@ -406,8 +577,6 @@ app.post("/", async (req, res) => {
       error
     );
 
-    // If a workflow run was already created,
-    // mark it failed.
     if (workflowRunId) {
       try {
         await hasura.request(
