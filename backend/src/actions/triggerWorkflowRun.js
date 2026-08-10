@@ -131,6 +131,19 @@ const CREATE_RUN = gql`
     }
   }
 `;
+const GET_QUOTA = gql`
+  query GetQuota(
+    $orgId: uuid!
+  ) {
+    organizations_by_pk(
+      id: $orgId
+    ) {
+      id
+      calls_used
+      calls_allowed
+    }
+  }
+`;
 
 const RESERVE_QUOTA = gql`
   mutation ReserveQuota(
