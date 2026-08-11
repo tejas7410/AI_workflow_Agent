@@ -77,6 +77,7 @@ export default function WorkflowPage() {
   const [runId, setRunId] =
     useState<string | null>(null);
 
+
   const [running, setRunning] =
     useState(false);
 
@@ -476,10 +477,11 @@ export default function WorkflowPage() {
         </div>
 
         {message && (
-          <div className="mt-5 rounded border border-slate-800 bg-slate-900 p-3 text-sm text-slate-300">
-            {message}
-          </div>
-        )}
+  <div className="mt-5 rounded border border-slate-800 bg-slate-900 p-3 text-sm text-slate-300">
+    {message}
+  </div>
+)}
+
 
         <section className="mt-8 rounded-xl border border-slate-800 bg-slate-900 p-6">
           <h2 className="text-xl font-semibold">
@@ -576,8 +578,9 @@ export default function WorkflowPage() {
         />
 
         <WorkflowRunMonitor
-          workflowRunId={runId}
-        />
+  workflowRunId={runId}
+  onRunUpdated={loadWorkflow}
+/>
 
         <section className="mt-8 rounded-xl border border-slate-800 bg-slate-900 p-6">
           <h2 className="text-xl font-semibold">

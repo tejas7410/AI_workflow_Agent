@@ -1,8 +1,15 @@
-const app = require("../src/actions/triggerWorkflowRun");
+const app = require("../src/actions/approveStep");
 
 module.exports = (req, res) => {
-  if (req.url === "/api" || req.url.startsWith("/api?")) {
-    req.url = req.url.replace(/^\/api/, "") || "/";
+  if (
+    req.url === "/api/approveStep" ||
+    req.url.startsWith("/api/approveStep?")
+  ) {
+    req.url =
+      req.url.replace(
+        /^\/api\/approveStep/,
+        ""
+      ) || "/";
   }
 
   return app(req, res);

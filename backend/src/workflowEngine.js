@@ -1,4 +1,8 @@
-const { gql } = require("graphql-request");
+require("dotenv").config();
+
+const {
+  gql,
+} = require("graphql-request");
 
 const CREATE_STEP_RUN = gql`
   mutation CreateStepRun(
@@ -19,28 +23,6 @@ const CREATE_STEP_RUN = gql`
     ) {
       id
       status
-      attempt_count
-    }
-  }
-`;
-
-const UPDATE_STEP_RUN_RETRY = gql`
-  mutation RetryStepRun(
-    $id: uuid!
-    $attemptCount: Int!
-    $error: String
-  ) {
-    update_step_runs_by_pk(
-      pk_columns: { id: $id }
-      _set: {
-        status: "retrying"
-        attempt_count: $attemptCount
-        error: $error
-      }
-    ) {
-      id
-      status
-      attempt_count
     }
   }
 `;
@@ -61,8 +43,6 @@ const COMPLETE_STEP_RUN = gql`
     ) {
       id
       status
-      output
-      completed_at
     }
   }
 `;
@@ -71,19 +51,37 @@ const FAIL_STEP_RUN = gql`
   mutation FailStepRun(
     $id: uuid!
     $error: String!
-    $completedAt: timestamptz
   ) {
     update_step_runs_by_pk(
       pk_columns: { id: $id }
       _set: {
         status: "failed"
         error: $error
-        completed_at: $completedAt
       }
     ) {
       id
       status
-      error
+    }
+  }
+`;
+
+const RETRY_STEP_RUN = gql`
+  mutation RetryStepRun(
+    $id: uuid!
+    $attemptCount: Int!
+    $error: String!
+  ) {
+    update_step_runs_by_pk(
+      pk_columns: { id: $id }
+      _set: {
+        status: "running"
+        attempt_count: $attemptCount
+        error: $error
+      }
+    ) {
+      id
+      status
+      attempt_count
     }
   }
 `;
@@ -102,7 +100,6 @@ const PAUSE_STEP_RUN = gql`
     ) {
       id
       status
-      output
     }
   }
 `;
@@ -144,7 +141,9 @@ const PAUSE_WORKFLOW_RUN = gql`
 `;
 
 const RESUME_WORKFLOW_RUN = gql`
-  mutation ResumeWorkflowRun($id: uuid!) {
+  mutation ResumeWorkflowRun(
+    $id: uuid!
+  ) {
     update_workflow_runs_by_pk(
       pk_columns: { id: $id }
       _set: {
@@ -158,30 +157,15 @@ const RESUME_WORKFLOW_RUN = gql`
   }
 `;
 
-const FAIL_WORKFLOW_RUN = gql`
-  mutation FailWorkflowRun(
-    $id: uuid!
-    $error: String!
-  ) {
-    update_workflow_runs_by_pk(
-      pk_columns: { id: $id }
-      _set: {
-        status: "failed"
-        error: $error
-      }
-    ) {
-      id
-      status
-      error
-    }
-  }
-`;
-
 const GET_WORKFLOW_STEPS = gql`
-  query GetWorkflowSteps($workflowId: uuid!) {
+  query GetWorkflowSteps(
+    $workflowId: uuid!
+  ) {
     workflow_steps(
       where: {
-        workflow_id: { _eq: $workflowId }
+        workflow_id: {
+          _eq: $workflowId
+        }
       }
       order_by: {
         step_order: asc
@@ -214,6 +198,7 @@ const GET_RUN_STEP_OUTPUTS = gql`
       workflow_step_id
       status
       output
+
       workflow_step {
         type
       }
@@ -221,61 +206,93 @@ const GET_RUN_STEP_OUTPUTS = gql`
   }
 `;
 
-async function executeHttpRequest(config) {
-  const method =
-    (config.method || "GET").toUpperCase();
+function executeHttpRequest(config) {
+  return (async () => {
+    const method =
+      (config.method || "GET").toUpperCase();
 
-  const url = config.url;
+    const url = config.url;
 
-  if (!url) {
-    throw new Error(
-      "http_request requires config.url"
-    );
-  }
-
-  const options = {
-    method,
-    headers: config.headers || {},
-  };
-
-  if (
-    config.body !== undefined &&
-    method !== "GET" &&
-    method !== "HEAD"
-  ) {
-    options.body =
-      typeof config.body === "string"
-        ? config.body
-        : JSON.stringify(config.body);
-
-    if (!options.headers["Content-Type"]) {
-      options.headers["Content-Type"] =
-        "application/json";
+    if (!url) {
+      throw new Error(
+        "http_request requires config.url"
+      );
     }
-  }
 
-  const response = await fetch(url, options);
+    if (
+      !["GET", "POST"].includes(method)
+    ) {
+      throw new Error(
+        "Only GET and POST are supported"
+      );
+    }
 
-  const text = await response.text();
+    const controller =
+      new AbortController();
 
-  let body;
+    const timeout =
+      setTimeout(
+        () => controller.abort(),
+        10000
+      );
 
-  try {
-    body = JSON.parse(text);
-  } catch {
-    body = text;
-  }
+    try {
+      const options = {
+        method,
+        headers:
+          config.headers || {},
+        signal:
+          controller.signal,
+      };
 
-  if (!response.ok) {
-    throw new Error(
-      `HTTP request failed with status ${response.status}`
-    );
-  }
+      if (
+        config.body !== undefined &&
+        method !== "GET"
+      ) {
+        options.body =
+          typeof config.body === "string"
+            ? config.body
+            : JSON.stringify(config.body);
 
-  return {
-    status: response.status,
-    body,
-  };
+        if (
+          !options.headers[
+            "Content-Type"
+          ]
+        ) {
+          options.headers[
+            "Content-Type"
+          ] = "application/json";
+        }
+      }
+
+      const response =
+        await fetch(url, options);
+
+      const text =
+        await response.text();
+
+      let body;
+
+      try {
+        body = JSON.parse(text);
+      } catch {
+        body = text;
+      }
+
+      if (!response.ok) {
+        throw new Error(
+          `HTTP request failed with status ${response.status}`
+        );
+      }
+
+      return {
+        status: response.status,
+        body,
+      };
+    } finally {
+      clearTimeout(timeout);
+    }
+  })();
 }
 
 function evaluateConditional(
@@ -288,16 +305,27 @@ function evaluateConditional(
     config.source ===
     "previous.output.text"
   ) {
-    value = previousOutput?.text;
+    value =
+      previousOutput?.text;
   }
 
-  if (config.condition === "contains") {
-    return String(value || "").includes(
-      String(config.value || "")
+  if (
+    config.condition ===
+    "contains"
+  ) {
+    return String(
+      value || ""
+    ).includes(
+      String(
+        config.value || ""
+      )
     );
   }
 
-  if (config.condition === "equals") {
+  if (
+    config.condition ===
+    "equals"
+  ) {
     return value === config.value;
   }
 
@@ -316,15 +344,18 @@ async function executeStepWithRetry(
       CREATE_STEP_RUN,
       {
         workflowRunId,
-        workflowStepId: step.id,
-        input: step.config,
+        workflowStepId:
+          step.id,
+        input:
+          step.config || {},
         startedAt:
           new Date().toISOString(),
       }
     );
 
   const stepRun =
-    stepRunResult.insert_step_runs_one;
+    stepRunResult
+      .insert_step_runs_one;
 
   let attempt = 1;
 
@@ -333,7 +364,8 @@ async function executeStepWithRetry(
       let output;
 
       if (
-        step.type === "llm_call"
+        step.type ===
+        "llm_call"
       ) {
         if (
           step.config?.provider !==
@@ -347,24 +379,23 @@ async function executeStepWithRetry(
         output = {
           provider: "test",
           model:
-            step.config.model || null,
+            step.config.model ||
+            null,
           prompt:
-            step.config.prompt || "",
+            step.config.prompt ||
+            "",
           text:
             "Hello from the test LLM",
         };
-      }
-
-      else if (
-        step.type === "http_request"
+      } else if (
+        step.type ===
+        "http_request"
       ) {
         output =
           await executeHttpRequest(
             step.config || {}
           );
-      }
-
-      else {
+      } else {
         throw new Error(
           `Step type cannot be executed here: ${step.type}`
         );
@@ -381,7 +412,8 @@ async function executeStepWithRetry(
       );
 
       return {
-        stepRunId: stepRun.id,
+        stepRunId:
+          stepRun.id,
         output,
       };
     } catch (error) {
@@ -393,8 +425,6 @@ async function executeStepWithRetry(
             error:
               error.message ||
               "Step failed",
-            completedAt:
-              new Date().toISOString(),
           }
         );
 
@@ -404,10 +434,11 @@ async function executeStepWithRetry(
       attempt += 1;
 
       await hasura.request(
-        UPDATE_STEP_RUN_RETRY,
+        RETRY_STEP_RUN,
         {
           id: stepRun.id,
-          attemptCount: attempt,
+          attemptCount:
+            attempt,
           error:
             error.message ||
             "Step failed; retrying",
@@ -432,12 +463,14 @@ async function executeWorkflowRun(
     index < steps.length;
     index++
   ) {
-    const step = steps[index];
+    const step =
+      steps[index];
 
-    // LLM / HTTP
     if (
-      step.type === "llm_call" ||
-      step.type === "http_request"
+      step.type ===
+        "llm_call" ||
+      step.type ===
+        "http_request"
     ) {
       const result =
         await executeStepWithRetry(
@@ -447,7 +480,8 @@ async function executeWorkflowRun(
         );
 
       if (
-        step.type === "llm_call"
+        step.type ===
+        "llm_call"
       ) {
         lastLlmOutput =
           result.output;
@@ -456,7 +490,6 @@ async function executeWorkflowRun(
       continue;
     }
 
-    // Conditional
     if (
       step.type ===
       "conditional_branch"
@@ -466,15 +499,18 @@ async function executeWorkflowRun(
           CREATE_STEP_RUN,
           {
             workflowRunId,
-            workflowStepId: step.id,
-            input: step.config,
+            workflowStepId:
+              step.id,
+            input:
+              step.config || {},
             startedAt:
               new Date().toISOString(),
           }
         );
 
       const stepRun =
-        stepRunResult.insert_step_runs_one;
+        stepRunResult
+          .insert_step_runs_one;
 
       const conditionMet =
         evaluateConditional(
@@ -483,7 +519,8 @@ async function executeWorkflowRun(
         );
 
       const output = {
-        condition_met: conditionMet,
+        condition_met:
+          conditionMet,
         source:
           step.config?.source ||
           null,
@@ -503,7 +540,7 @@ async function executeWorkflowRun(
       );
 
       if (!conditionMet) {
-        const completedRun =
+        const completed =
           await hasura.request(
             COMPLETE_WORKFLOW_RUN,
             {
@@ -515,7 +552,7 @@ async function executeWorkflowRun(
 
         return {
           status:
-            completedRun
+            completed
               .update_workflow_runs_by_pk
               .status,
         };
@@ -524,7 +561,6 @@ async function executeWorkflowRun(
       continue;
     }
 
-    // Approval
     if (
       step.type ===
       "approval_gate"
@@ -534,15 +570,18 @@ async function executeWorkflowRun(
           CREATE_STEP_RUN,
           {
             workflowRunId,
-            workflowStepId: step.id,
-            input: step.config,
+            workflowStepId:
+              step.id,
+            input:
+              step.config || {},
             startedAt:
               new Date().toISOString(),
           }
         );
 
       const stepRun =
-        stepRunResult.insert_step_runs_one;
+        stepRunResult
+          .insert_step_runs_one;
 
       const output = {
         message:
@@ -579,7 +618,7 @@ async function executeWorkflowRun(
     );
   }
 
-  const completedRun =
+  const completed =
     await hasura.request(
       COMPLETE_WORKFLOW_RUN,
       {
@@ -591,7 +630,7 @@ async function executeWorkflowRun(
 
   return {
     status:
-      completedRun
+      completed
         .update_workflow_runs_by_pk
         .status,
   };
@@ -617,7 +656,8 @@ async function resumeWorkflowRun(
   const approvalIndex =
     steps.findIndex(
       (step) =>
-        step.id === approvedStepId
+        step.id ===
+        approvedStepId
     );
 
   if (approvalIndex === -1) {
@@ -634,11 +674,12 @@ async function resumeWorkflowRun(
       }
     );
 
-  let lastLlmOutput = null;
+  let lastLlmOutput =
+    null;
 
   for (
-    const stepRun
-    of previousResult.step_runs
+    const stepRun of
+    previousResult.step_runs
   ) {
     if (
       stepRun.workflow_step?.type ===

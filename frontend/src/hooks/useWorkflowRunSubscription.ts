@@ -4,22 +4,17 @@ import { useEffect, useState } from "react";
 import { createClient } from "graphql-ws";
 import { nhost } from "@/lib/nhost";
 
-export type StepRun = {
+type WorkflowRun = {
   id: string;
-  workflow_run_id: string;
-  workflow_step_id: string;
   status: string;
-  output: Record<string, unknown> | null;
-  error: string | null;
-  attempt_count: number;
-  approved_by: string | null;
-  approved_at: string | null;
+  trigger_type: string;
   started_at: string | null;
+  paused_at: string | null;
   completed_at: string | null;
 };
 
 type SubscriptionData = {
-  step_runs: StepRun[];
+  workflow_runs: WorkflowRun[];
 };
 
 type SubscriptionResult = {
@@ -29,18 +24,18 @@ type SubscriptionResult = {
   }>;
 };
 
-export function useStepRunsSubscription(
+export function useWorkflowRunSubscription(
   workflowRunId: string | null
 ) {
-  const [stepRuns, setStepRuns] =
-    useState<StepRun[]>([]);
+  const [workflowRun, setWorkflowRun] =
+    useState<WorkflowRun | null>(null);
 
   const [error, setError] =
     useState<string | null>(null);
 
   useEffect(() => {
     if (!workflowRunId) {
-      setStepRuns([]);
+      setWorkflowRun(null);
       setError(null);
       return;
     }
@@ -60,9 +55,6 @@ export function useStepRunsSubscription(
       return;
     }
 
-    /*
-     * Nhost GraphQL WebSocket endpoint.
-     */
     const wsUrl =
       `wss://${subdomain}.graphql.${region}.nhost.run/v1/graphql`;
 
@@ -92,13 +84,13 @@ export function useStepRunsSubscription(
       on: {
         connecting: () => {
           console.log(
-            "GraphQL WebSocket connecting..."
+            "Workflow run WebSocket connecting..."
           );
         },
 
         connected: () => {
           console.log(
-            "GraphQL WebSocket connected."
+            "Workflow run WebSocket connected."
           );
 
           if (!stopped) {
@@ -106,23 +98,19 @@ export function useStepRunsSubscription(
           }
         },
 
-        error: (wsError) => {
-          if (stopped) {
-            return;
-          }
-
-          console.error(
-            "GraphQL WebSocket error:",
-            wsError
-          );
-        },
-
         closed: () => {
           if (!stopped) {
             setError(
-              "Live updates disconnected."
+              "Workflow run live updates disconnected."
             );
           }
+        },
+
+        error: (wsError) => {
+          console.error(
+            "Workflow run WebSocket error:",
+            wsError
+          );
         },
       },
     });
@@ -131,31 +119,19 @@ export function useStepRunsSubscription(
       client.subscribe<SubscriptionData>(
         {
           query: `
-            subscription StepRuns(
+            subscription WorkflowRun(
               $workflowRunId: uuid!
             ) {
-              step_runs(
-                where: {
-                  workflow_run_id: {
-                    _eq: $workflowRunId
-                  }
-                }
-                order_by: {
-                  created_at: asc
-                }
-              ) {
-                id
-                workflow_run_id
-                workflow_step_id
-                status
-                output
-                error
-                attempt_count
-                approved_by
-                approved_at
-                started_at
-                completed_at
-              }
+              workflow_runs(
+  where: {
+    id: {
+      _eq: $workflowRunId
+    }
+  }
+) {
+  id
+  status
+}
             }
           `,
 
@@ -174,7 +150,7 @@ export function useStepRunsSubscription(
 
             if (result.errors?.length) {
               console.error(
-                "Step subscription GraphQL errors:",
+                "Workflow run subscription errors:",
                 result.errors
               );
 
@@ -185,10 +161,11 @@ export function useStepRunsSubscription(
               return;
             }
 
-            if (result.data?.step_runs) {
-              setStepRuns(
-                result.data.step_runs
-              );
+            const run =
+              result.data?.workflow_runs?.[0];
+
+            if (run) {
+              setWorkflowRun(run);
             }
 
             setError(null);
@@ -200,12 +177,12 @@ export function useStepRunsSubscription(
             }
 
             console.error(
-              "Step subscription error:",
+              "Workflow run subscription error:",
               subscriptionError
             );
 
             setError(
-              "Live updates disconnected."
+              "Workflow run live updates disconnected."
             );
           },
 
@@ -215,29 +192,14 @@ export function useStepRunsSubscription(
 
     return () => {
       stopped = true;
-
-      try {
-        unsubscribe();
-      } catch (error) {
-        console.error(
-          "Subscription cleanup error:",
-          error
-        );
-      }
-
-      try {
-        client.dispose();
-      } catch (error) {
-        console.error(
-          "WebSocket cleanup error:",
-          error
-        );
-      }
+      unsubscribe();
+      client.dispose();
     };
   }, [workflowRunId]);
 
   return {
-    stepRuns,
+    workflowRun,
+    status: workflowRun?.status ?? null,
     error,
   };
 }

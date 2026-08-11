@@ -1,28 +1,34 @@
 "use client";
 
-import { useStepRunsSubscription } from "@/hooks/useStepRunsSubscription";
-import { nhost } from "@/lib/nhost";
 import { useState } from "react";
+import { nhost } from "@/lib/nhost";
+import {
+  useStepRunsSubscription,
+} from "@/hooks/useStepRunsSubscription";
 
-type GraphQLBody<T> = {
-  data?: T;
+type Props = {
+  workflowRunId: string | null;
+  onRunUpdated?: () => void;
+};
+
+type ApproveStepResult = {
+  step_run_id: string;
+  status: string;
+  approved_by: string | null;
+  approved_at: string | null;
 };
 
 type ApproveStepResponse = {
-  approveStep: {
-    step_run_id: string;
-    status: string;
-    approved_by: string | null;
-    approved_at: string | null;
-    workflow_run_status: string;
-  };
+  approveStep?: ApproveStepResult;
 };
-type Props = {
-  workflowRunId: string | null;
+
+type GraphQLResponse = {
+  data?: ApproveStepResponse;
 };
 
 export default function WorkflowRunMonitor({
   workflowRunId,
+  onRunUpdated,
 }: Props) {
   const {
     stepRuns,
@@ -45,56 +51,69 @@ export default function WorkflowRunMonitor({
     setMessage("");
 
     try {
-  const response =
-    await nhost.graphql.request({
-      query: `
-        mutation ApproveStep(
-          $stepRunId: uuid!
-        ) {
-          approveStep(
-            step_run_id: $stepRunId
-          ) {
-            step_run_id
-            status
-            approved_by
-            approved_at
-          }
-        }
-      `,
-      variables: {
-        stepRunId,
-      },
-    });
+      const response =
+        await nhost.graphql.request({
+          query: `
+            mutation ApproveStep(
+              $stepRunId: uuid!
+            ) {
+              approveStep(
+                step_run_id: $stepRunId
+              ) {
+                step_run_id
+                status
+                approved_by
+                approved_at
+              }
+            }
+          `,
 
-  const body =
-    response.body as unknown as {
-      data?: {
-        approveStep?: {
-          step_run_id: string;
-          status: string;
-          approved_by: string | null;
-          approved_at: string | null;
-        };
-      };
-    };
+          variables: {
+            stepRunId,
+          },
+        });
 
-  const result =
-    body.data?.approveStep;
+      const body =
+        response.body as unknown as GraphQLResponse;
 
-  setMessage(
-    result?.status === "approved"
-      ? "Approval accepted. Workflow resumed."
-      : "Approval completed."
-  );
-} catch (error) {
-  setMessage(
-    error instanceof Error
-      ? error.message
-      : "Approval failed"
-  );
-} finally {
-  setApproving(null);
-}
+      const result =
+        body.data?.approveStep;
+
+      if (!result) {
+        throw new Error(
+          "Approval response was empty."
+        );
+      }
+
+      if (
+        result.status ===
+        "approved"
+      ) {
+        setMessage(
+          "Approval accepted. Workflow resumed."
+        );
+
+        /*
+         * Refresh workflow + Recent Runs.
+         *
+         * The step subscription continues
+         * handling live step updates.
+         */
+        onRunUpdated?.();
+      } else {
+        setMessage(
+          "Approval completed."
+        );
+      }
+    } catch (error) {
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : "Approval failed"
+      );
+    } finally {
+      setApproving(null);
+    }
   }
 
   if (!workflowRunId) {
@@ -103,7 +122,7 @@ export default function WorkflowRunMonitor({
 
   return (
     <section className="mt-8 rounded-xl border border-slate-800 bg-slate-900 p-6">
-      <div className="flex items-center justify-between">
+      <div className="flex items-start justify-between">
         <div>
           <h2 className="text-xl font-semibold">
             Live Run
@@ -173,6 +192,14 @@ export default function WorkflowRunMonitor({
                       2
                     )}
                   </pre>
+                )}
+
+                {stepRun.attempt_count >
+                  1 && (
+                  <p className="mt-2 text-xs text-yellow-400">
+                    Attempt:{" "}
+                    {stepRun.attempt_count}
+                  </p>
                 )}
 
                 {isPaused && (
